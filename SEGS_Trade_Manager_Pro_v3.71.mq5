@@ -10342,7 +10342,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          double obL = (g_obSignalLow > 0.0) ? g_obSignalLow : 0.0;
          double obH = (g_obSignalHigh > 0.0) ? g_obSignalHigh : 0.0;
          g_staticSL = GetSafestStructuralStopLoss(sym, activeTradeDir, g_staticEntryPrice, obL, obH, curAtr, false);
-         if(         g_staticSL = GetSafestStructuralStopLoss(sym, activeTradeDir, g_staticEntryPrice, obL, obH, curAtr, false); <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
+         if(g_staticSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
       }
       long stopLevel = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
       double minStopDist = (double)stopLevel * pt;
@@ -10979,7 +10979,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
       }
 
       candSL = GetSafestStructuralStopLoss(sym, "BUY", candEntry, obBottom, obTop, curAtr, false);
-      if(      candSL = GetSafestStructuralStopLoss(sym, "BUY", candEntry, obBottom, obTop, curAtr, false); <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
+      if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
       
       double candTP1 = 0.0, candTP2 = 0.0, candTP3 = 0.0, candTP4 = 0.0;
       double rrTP2 = 0.0, rrWeighted = 0.0;
@@ -11281,7 +11281,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
       double candEntryH1 = (h1Dir == "BUY") ? g_obSignalHigh : g_obSignalLow;
       double obBuffer = MathMax(0.20 * curAtr, 6.0 * pipSize);
       double candSL_H1 = GetSafestStructuralStopLoss(sym, h1Dir, candEntryH1, g_obSignalLow, g_obSignalHigh, curAtr);
-      if(      double candSL_H1 = GetSafestStructuralStopLoss(sym, h1Dir, candEntryH1, g_obSignalLow, g_obSignalHigh, curAtr); <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
+      if(candSL_H1 <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
 
       double minRisk = MathMax(18.0 * pipSize, 0.40 * curAtr);
       if(h1Dir == "BUY" && (candEntryH1 - candSL_H1) < minRisk) candSL_H1 = candEntryH1 - minRisk;
@@ -11441,7 +11441,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          }
 
          double candSL    = GetSafestStructuralStopLoss(sym, obDir, candEntry, g_obSignalLow, g_obSignalHigh, curAtr);
-         if(         double candSL    = GetSafestStructuralStopLoss(sym, obDir, candEntry, g_obSignalLow, g_obSignalHigh, curAtr); <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
+         if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
 
          double minRisk = MathMax(18.0 * pipSize, 0.40 * curAtr);
          if(obDir == "BUY" && (candEntry - candSL) < minRisk) candSL = candEntry - minRisk;
@@ -12140,7 +12140,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          // or at multi-day swing low where necessary as the safest invalidation floor!
          candEntry = targetPlannedEntry;
          candSL = GetSafestStructuralStopLoss(sym, "BUY", candEntry, g_obSignalLow, g_obSignalHigh, curAtr, false);
-         if(         candSL = GetSafestStructuralStopLoss(sym, "BUY", candEntry, g_obSignalLow, g_obSignalHigh, curAtr, false); <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
+         if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
          // Precision Buy Zone Enforcement: The candle base extension above the Demand Order Block (or deeper retracement during Toronto window) is the primary planned entry trigger point!
          double zoneEntryTol = MathMax((double)SymbolInfoInteger(sym, SYMBOL_SPREAD) * SymbolInfoDouble(sym, SYMBOL_POINT) * 2.0, 3.0 * pipSize);
          double maxAllowedDrift = MathMax(InpMaxEntryDriftATR * curAtr, 15.0 * pipSize);
@@ -12301,7 +12301,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          double touchTolBuy = MathMax(0.30 * curAtr, 10.0 * pipSize);
          candEntry = structuralEntry;
          candSL = GetSafestStructuralStopLoss(sym, "BUY", candEntry, g_obSignalLow, g_obSignalHigh, curAtr, true);
-         if(         candSL = GetSafestStructuralStopLoss(sym, "BUY", candEntry, g_obSignalLow, g_obSignalHigh, curAtr, true); <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
+         if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
          // Check if price touched or penetrated the planned entry at Support:
          double l0_M1 = iLow(sym, PERIOD_M1, 0), l1_M1 = iLow(sym, PERIOD_M1, 1);
          double l0_M5 = iLow(sym, PERIOD_M5, 0), l1_M5 = iLow(sym, PERIOD_M5, 1);
@@ -12365,7 +12365,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          if(g_obSignalHigh > 0.0 && candSL <= g_obSignalHigh) candSL = g_obSignalHigh + fewPipsSell;
 
          candSL = GetSafestStructuralStopLoss(sym, "SELL", candEntry, g_obSignalLow, g_obSignalHigh, curAtr);
-         if(         candSL = GetSafestStructuralStopLoss(sym, "SELL", candEntry, g_obSignalLow, g_obSignalHigh, curAtr); <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
+         if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
 
          // Precision Sell Zone Enforcement: The candle base extension below the Supply Order Block (or deeper retracement during Toronto window) is the primary planned entry trigger point!
          double zoneEntryTol = MathMax((double)SymbolInfoInteger(sym, SYMBOL_SPREAD) * SymbolInfoDouble(sym, SYMBOL_POINT) * 2.0, 3.0 * pipSize);
