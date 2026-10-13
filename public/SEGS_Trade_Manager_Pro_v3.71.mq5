@@ -892,7 +892,7 @@ void   EvaluateMultiTimeframeTrendAndReversal(string sym, string &outH1Bias, str
 bool   CheckConfirmedSafeZoneBounce(string sym, string dir, double safeEntry);
 bool   GetOpenAdvisorTradeDetails(string sym, string &outDir, double &outEntry, double &outSL, double &outTP1, double &outTP2, double &outTP3, double &outTP4, int &outCount);
 double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, double obZoneLow, double obZoneHigh, double curAtr, bool preferMultiDay=false);
-void   RunAdvisorStrategyEngine(bool forceScan=false, bool allowAutoTrade=true);
+void   RunAdvisorStrategyEngine(bool forceScan=false, bool allowAutoTrade=false);
 void   ApplySystemSettingsToAllCharts();
 //+------------------------------------------------------------------+
 //| Expert initialization function with Multi-Chart Error Boundary   |
@@ -1174,7 +1174,7 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
-void RunAdvisorStrategyEngine(bool forceScan=false, bool allowAutoTrade=false)
+void RunAdvisorStrategyEngine(bool forceScan, bool allowAutoTrade)
 {
    if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
    // Strategy engine runs independently of HUD visual toggle (Section 32, 47)
