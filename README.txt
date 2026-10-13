@@ -32,7 +32,7 @@ Verification actually performed
 - All packaged .mq5 files are byte-identical; TypeScript DECODED string has the same bytes.
   A TypeScript wrapper cannot itself be byte-identical to MQL5 source. Existing project
   copies and TypeScript application tests were not available and were not verified.
-- Canonical source SHA256: e3efe1c5938acd44bd240b78894dce026dbbe096b117df04eb1a7bfbfbe3ae8c
+- Canonical source SHA256: 5367b6f78ed1529f36e72b743a0f8d16eb802e6b7a50662e24efbae089a3de82
 
 Installation / remaining native validation
 1. Copy SEGS_Trade_Manager_Pro_v3.71.mq5 into MT5 MQL5/Experts.
@@ -51,7 +51,9 @@ Advisor entry protection is fixed centrally. Existing management of manually ope
 positions, legacy persisted targets, and trailing/breakeven behavior is retained.
 This audit does not certify every path in the original 18,000-line EA.
 
-Compilation correction: Seven malformed if conditions accidentally embedded the
-preceding assignment statement. All seven now check only their SL variable.
-Actual corrected guard statements compile in a C++ harness with -Werror;
-14 branch assertions passed. Native MQL5 compilation is still unverified.
+Compiler corrections incorporated into the full EA:
+- Seven malformed structural-stop guards now check only their SL variable.
+- RunAdvisorStrategyEngine defaults are declared once in its prototype:
+  forceScan=false, allowAutoTrade=false. The definition repeats no defaults.
+- All live tick/timer and user-triggered trading calls pass allowAutoTrade=true explicitly.
+Native MetaEditor recompilation is still required to confirm the compiler result.
