@@ -1,59 +1,44 @@
-SEGS MT5 repair v3.71 — validation and installation
+ SEGS-BOT — full EA v3.72
 
-This is a corrected source release candidate. Native MetaEditor compilation,
-Strategy Tester testing, and live MT5 chart attachment have NOT been performed.
-MetaEditor/MT5/Wine are absent in this environment. No .ex5 is supplied.
-The precise runtime detachment cause cannot be confirmed without Experts/Journal logs.
+[Download the full MT5 source](https://raw.githubusercontent.com/segunobisesan2-dev/SEGS-BOT/main/SEGS_Trade_Manager_Pro_v3.72.mq5)
 
-Verified changes
-- OnInit defers market processing and all position assignment until tick/timer readiness.
-- One-second timer; startup tolerates missing symbol metadata; failed indicator handles retry.
-- Symbol-derived pip fallback for display; invalid monetary metadata returns unavailable (0),
-  instead of inventing a tick value. Trade execution requires real point/tick data.
-- Direct EMA rejects zero/negative periods; partial-close volume step is guarded.
-- Deinit logs reason, last error, symbol, chart ID; timer and indicator handles are released.
-- Order-block, multi-day, auto-dual styles selectable with InpStructuralStopStyle.
-- Completed D1 bars 1–5; confirmed H4 pivots centered at bars 2–24 (bar 1 participates
-  as the completed confirmation neighbor); PDL/PDH, PWL/PWH, chart support/resistance.
-- Auto-dual considers nearby anchors independently of distant extremes, so a distant
-  weekly low/high cannot hide a nearby pivot. Buffers and proximity use ATR/tick size.
-- Final execution stop determined before risk sizing; all advisor legs use that stop.
-- BUY stops round downward and SELL stops upward, outside live broker stop distance.
-- No required structural anchor: trade deferred. Invalid-stop retry no longer opens
-  a market order with zero SL/TP. Brokers requiring naked entry will defer these trades.
-- Received dashboard synchronization persists per-chart visibility; hidden objects clear.
+Download all files using **Code → Download ZIP**. Install the v3.72 source, compile with F7 in MetaEditor, then validate on demo. No native MT5 compiler or runtime was available in this environment; successful native compilation and permanent resolution of detachment are not claimed.
 
-Verification actually performed
-- 12 assertions against the actual extracted structural stop function in a C++ harness,
-  with stubbed MT5 APIs: BUY/SELL, explicit styles, nearby and distant anchors,
-  missing point/tick, broker distance, coarse tick rounding, invalid direction.
-- Harness compiled using g++ -std=c++17 -Wall -Wextra -Werror.
-- Static lifecycle, stop-before-sizing, no 4.29 buffer, and balanced lexical delimiters.
-- All packaged .mq5 files are byte-identical; TypeScript DECODED string has the same bytes.
-  A TypeScript wrapper cannot itself be byte-identical to MQL5 source. Existing project
-  copies and TypeScript application tests were not available and were not verified.
-- Canonical source SHA256: 5367b6f78ed1529f36e72b743a0f8d16eb802e6b7a50662e24efbae089a3de82
+ Stop calibration requested from the chart
 
-Installation / remaining native validation
-1. Copy SEGS_Trade_Manager_Pro_v3.71.mq5 into MT5 MQL5/Experts.
-2. Open it in MetaEditor and compile with F7. Verify the compiler result; resolve any
-   reported errors before attaching. Do not retain an old .ex5 under the new filename.
-3. Select SL_STYLE_AUTO_DUAL (default). Buffer ATR default 0.20; proximity ATR 0.85.
-4. Test on a demo account with Algo Trading disabled initially: AUDUSD, GBPUSD, XAUUSD;
-   new charts with history still loading, terminal restart, timeframe change, and H
-   across several charts. Enable demo trading and verify both directions and actual risk.
-5. If attachment still fails, provide Experts/Journal output including [SEGS DEINIT].
+Default: `SL_STYLE_ACTIVE_ORDER_BLOCK`. Select the nearest non-invalidated, same-direction M30/H1 order block whose floor is below the BUY market or ceiling above the SELL market, within the configured ATR distance. BUY SL is below the active demand floor; SELL SL is above the active supply ceiling. No absolute GBPUSD/XAUUSD price is embedded.
 
-Scope
-Original supplied code identifies itself as v3.70; patched source identifies as v3.71.
-The v3.50 filenames in this ZIP are compatibility copies of the v3.71 source.
-Advisor entry protection is fixed centrally. Existing management of manually opened
-positions, legacy persisted targets, and trailing/breakeven behavior is retained.
-This audit does not certify every path in the original 18,000-line EA.
+The default buffer is max(0.05 × H1 ATR, 3 trade ticks). Broker minimum stop distance can require a larger separation. `InpActiveOBMaxDistanceATR` defaults to 3.0. Missing active zones defer entries; existing protection is retained.
 
-Compiler corrections incorporated into the full EA:
-- Seven malformed structural-stop guards now check only their SL variable.
-- RunAdvisorStrategyEngine defaults are declared once in its prototype:
-  forceScan=false, allowAutoTrade=false. The definition repeats no defaults.
-- All live tick/timer and user-triggered trading calls pass allowAutoTrade=true explicitly.
-Native MetaEditor recompilation is still required to confirm the compiler result.
+ System setting across charts
+
+On **one chart**, set `InpPublishStopSettingsToAllCharts=true` and select the stop style, buffer, maximum distance, and `InpTrailActiveOrderBlock` preference in Inputs. This publishes the policy to account-scoped terminal global variables. All charts load that policy on the next ready event, normally within one second. Keep `InpPublishStopSettingsToAllCharts=false` on other charts, so they consume the same policy. Initial attachment creates the default policy if absent. The policy persists across terminal restart. It applies within this terminal/account.
+
+`InpTrailActiveOrderBlock=true` tightens existing advisor-position stops to the active zone. It never widens an existing stop. A profitable BUY stop may be above the original entry; a profitable SELL stop may be below it. Existing manual positions are not included in this new trailing runner. Normal existing manual-management behavior is retained.
+
+When an unfilled old entry is on the wrong side of the new active-zone stop, the old plan is disarmed and a current-price preview shown. A fresh normal strategy confirmation is required before execution. It does not convert a stale signal into an immediate market entry.
+
+ Attachment hardening and diagnostics
+
+- Market callbacks wait for point/tick metadata, synchronized M1–W1 series, minimum history, allocated handles and calculated indicator data. Initialization does not scan or trade. Missing data retries without returning INIT_FAILED or calling ExpertRemove.
+- Full scans throttle to one second; explicit forced scans remain immediate.
+- Clamp OB ATR/swing/lookback inputs to safe scan ranges; guard ATR array bounds and volume-leg allocation.
+- Bound cached nearest-zone indexes against actual current arrays and reset indexes when rebuilding zones.
+- Do not cache a scan as complete before history copying succeeds, so incomplete scans retry.
+- Chart custom events and trade transactions cannot access unready startup state.
+- `SEGS_PHASE_<ChartID>` terminal globals record the last runner phase: 1 position protection, 2 liquidity/OB scan, 3 strategy scan, 4 timer UI drawing. Existing `[SEGS DEINIT]` logs include reason and last error.
+
+The actual reported detachment has not been reproduced, and no Experts/Journal error was supplied. Fatal runtime failures cannot be caught by MQL5 exception handling. The code hardens identified paths; it cannot promise that every possible broker/data/runtime failure has been eliminated.
+
+ Verification performed
+
+18 assertions against the extracted current structural-stop functions compiled using g++ with `-std=c++17 -Wall -Wextra -Werror`, using stubbed MT5 APIs. Includes active demand/supply, invalidated zones, missing nearby active zones, zero metadata, tick rounding, broker distance, original dual modes, and a profitable stop above original BUY entry. This is **not native MQL5 compilation**.
+
+Seven corrected stop-guard statements retain their regression harness. Source default-parameter and lexical-integrity checks pass. All six `.mq5` copies and the decoded TypeScript string are identical. Versioned 3.50/3.71 filenames are compatibility copies of 3.72, not old implementations.
+
+ Required MT5 validation
+
+1. Remove the older EA instance from the chart, replace its source with v3.72, and compile with F7. Verify the file attached is the newly compiled v3.72 executable.
+2. On demo, first disable Algo Trading and attach to GBPUSD, XAUUSD, AUDUSD, USDJPY and a chart still loading history. Wait for readiness and test timeframe changes/restart.
+3. Publish the system stop settings from one chart. Check active zones and both BUY/SELL protection. Enable demo Algo Trading to exercise trailing modifications.
+4. If detachment remains, provide the Experts and Journal entries at the failure time, including any fatal error, `[SEGS DEINIT]`, and `SEGS_PHASE_<ChartID>` value (F3 terminal global variables).

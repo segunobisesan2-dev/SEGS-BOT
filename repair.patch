@@ -1,788 +1,302 @@
---- original.mq5
-+++ SEGS_Trade_Manager_Pro_v3.71.mq5
-@@ -15,15 +15,15 @@
- //+------------------------------------------------------------------+
- #property copyright "SEGS Trade Manager Pro v3.70 (Unified Multi-Strategy Confluence)"
- #property link      "https://ai.studio/build"
--#property version   "3.70"
-+#property version   "3.71"
- #property strict
- 
- // Standard MT5 Trade libraries for execution & position queries
--#include <Trade\\Trade.mqh>
--#include <Trade\\PositionInfo.mqh>
--#include <Trade\\OrderInfo.mqh>
--#include <Trade\\HistoryOrderInfo.mqh>
--#include <Trade\\SymbolInfo.mqh>
-+#include <Trade\Trade.mqh>
-+#include <Trade\PositionInfo.mqh>
-+#include <Trade\OrderInfo.mqh>
-+#include <Trade\HistoryOrderInfo.mqh>
-+#include <Trade\SymbolInfo.mqh>
- 
- CTrade         trade;
- CPositionInfo  posInfo;
-@@ -892,13 +892,51 @@
- bool   CheckConfirmedSafeZoneBounce(string sym, string dir, double safeEntry);
- bool   GetOpenAdvisorTradeDetails(string sym, string &outDir, double &outEntry, double &outSL, double &outTP1, double &outTP2, double &outTP3, double &outTP4, int &outCount);
- double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, double obZoneLow, double obZoneHigh, double curAtr, bool preferMultiDay=false);
--void   RunAdvisorStrategyEngine(bool forceScan=false, bool allowAutoTrade=true);
-+void   RunAdvisorStrategyEngine(bool forceScan=false, bool allowAutoTrade=false);
- void   ApplySystemSettingsToAllCharts();
- //+------------------------------------------------------------------+
- //| Expert initialization function with Multi-Chart Error Boundary   |
- //+------------------------------------------------------------------+
-+enum ENUM_SEGS_SL_STYLE
-+{
-+   SL_STYLE_ORDER_BLOCK = 0,
-+   SL_STYLE_MULTI_DAY = 1,
-+   SL_STYLE_AUTO_DUAL = 2
-+};
-+input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_AUTO_DUAL;
-+input double InpStructuralBufferATR = 0.20;
-+input double InpDualProximityATR = 0.85;
-+bool g_runtimeReady = false;
+--- v3.71-before.mq5
++++ v3.72.mq5
+@@ -2 +2 @@
+-//|                                SEGS_Trade_Manager_Pro_v3.70.mq5 |
++//|                                SEGS_Trade_Manager_Pro_v3.72.mq5 |
+@@ -16 +16 @@
+-#property copyright "SEGS Trade Manager Pro v3.70 (Unified Multi-Strategy Confluence)"
++#property copyright "SEGS Trade Manager Pro v3.72 (Unified Multi-Strategy Confluence)"
+@@ -18 +18 @@
+-#property version   "3.71"
++#property version   "3.72"
+@@ -904 +904,2 @@
+-   SL_STYLE_AUTO_DUAL = 2
++   SL_STYLE_AUTO_DUAL = 2,
++   SL_STYLE_ACTIVE_ORDER_BLOCK = 3
+@@ -906 +907,34 @@
+-input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_AUTO_DUAL;
++input group "=== System Structural Stop Loss ==="
++input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_ACTIVE_ORDER_BLOCK;
++input bool InpPublishStopSettingsToAllCharts = false; // Set true on one chart to publish these inputs
++input double InpActiveOBBufferATR = 0.05; // Small buffer beyond active OB floor/ceiling
++input int InpActiveOBBufferTicks = 3;
++input double InpActiveOBMaxDistanceATR = 3.0;
++input bool InpTrailActiveOrderBlock = true; // Tighten existing advisor positions only
++ENUM_SEGS_SL_STYLE g_systemStopStyle = SL_STYLE_ACTIVE_ORDER_BLOCK;
++double g_systemOBBufferATR = 0.05, g_systemOBMaxDistanceATR = 3.0;
++int g_systemOBBufferTicks = 3;
++bool g_systemTrailOB = true;
 +
-+// Readiness is checked again on every event; missing history never detaches the EA.
-+bool SEGSMarketReady(string sym)
++string SEGSStopKey(string field)
 +{
-+   MqlTick quote;
-+   double point = SymbolInfoDouble(sym, SYMBOL_POINT);
-+   double tick = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
-+   return MathIsValidNumber(point) && point > 0.0 &&
-+          MathIsValidNumber(tick) && tick > 0.0 &&
-+          SymbolInfoTick(sym, quote) && quote.bid > 0.0 && quote.ask >= quote.bid;
++   return "SEGS_SL_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + field;
 +}
 +
-+bool SEGSEnsureRuntimeReady()
++void SEGSSyncStopSettings(bool publish=false)
 +{
-+   if(!SEGSMarketReady(_Symbol)) return false;
-+   InitIndicatorHandles(_Symbol);
-+   if(!g_runtimeReady)
++   if(publish || !GlobalVariableCheck(SEGSStopKey("STYLE")))
 +   {
-+      InitIndicatorHandles(_Symbol);
-+      ReconstructPositionGroups();
-+      g_runtimeReady = true;
-+      PrintFormat("[SEGS READY] Market metadata available on %s", _Symbol);
++      GlobalVariableSet(SEGSStopKey("STYLE"), (double)InpStructuralStopStyle);
++      GlobalVariableSet(SEGSStopKey("BUFFER_ATR"), MathMax(0.0, MathMin(1.0, InpActiveOBBufferATR)));
++      GlobalVariableSet(SEGSStopKey("BUFFER_TICKS"), (double)MathMax(1, MathMin(100, InpActiveOBBufferTicks)));
++      GlobalVariableSet(SEGSStopKey("MAX_DISTANCE_ATR"), MathMax(0.1, MathMin(20.0, InpActiveOBMaxDistanceATR)));
++      GlobalVariableSet(SEGSStopKey("TRAIL"), InpTrailActiveOrderBlock ? 1.0 : 0.0);
 +   }
-+   return true;
++   g_systemStopStyle = (ENUM_SEGS_SL_STYLE)(int)MathMax(0, MathMin(3, GlobalVariableGet(SEGSStopKey("STYLE"))));
++   g_systemOBBufferATR = MathMax(0.0, MathMin(1.0, GlobalVariableGet(SEGSStopKey("BUFFER_ATR"))));
++   g_systemOBBufferTicks = (int)MathMax(1, MathMin(100, GlobalVariableGet(SEGSStopKey("BUFFER_TICKS"))));
++   g_systemOBMaxDistanceATR = MathMax(0.1, MathMin(20.0, GlobalVariableGet(SEGSStopKey("MAX_DISTANCE_ATR"))));
++   g_systemTrailOB = GlobalVariableGet(SEGSStopKey("TRAIL")) > 0.5;
 +}
 +
- int OnInit()
- {
-+   g_runtimeReady = false;
-+   SymbolSelect(_Symbol, true);
-    PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.50 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
- 
-    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
-@@ -977,46 +1015,10 @@
-    Print("[SEGS INIT][Stage 5] Restoring persistent state from Global Variables and isolated storage...");
-    RestoreAdvisorPersistentState();
- 
--   // STAGE 6: Chart Object Initialization & Cleanup
--   if(UninitializeReason() == REASON_CHARTCHANGE)
--   {
--      DeleteTerminalObjects();
--      UpdateOpenTradeMarkings();
--      if(g_showTradeAdviceLines) UpdateTradeAdviceLines();
--   }
--   else
--   {
--      ObjectsDeleteAll(0, PREFIX);
--      UpdateOpenTradeMarkings();
--      if(g_showTradeAdviceLines) UpdateTradeAdviceLines();
--   }
--
--   // STAGE 7: Indicator Handles Allocation with Safety Guard
--   PrintFormat("[SEGS INIT][Stage 7] Initializing technical indicator handles for symbol %s...", _Symbol);
--   InitIndicatorHandles(_Symbol);
--
--   // STAGE 8: Market Quality Reset & Position Group Reconstruction
--   ResetMarketQualityState(_Symbol);
--   ReconstructPositionGroups();
--
--   if(g_currentMode == MODE_COMPLETE_AUTO)
--      ProcessUnassignedPositions();
--
--   // STAGE 9: Non-Blocking Strategy Engine Bootstrap
--   if(iBars(_Symbol, PERIOD_H1) >= 2)
--   {
--      RunAdvisorStrategyEngine(true, false);
--      Print("[SEGS INIT][Stage 9] Strategy Engine initial evaluation complete.");
--   }
--   else
--   {
--      Print("[SEGS INIT][Stage 9] Symbol history downloading; initial strategy scan deferred to first tick/timer.");
--   }
--
--   EventSetMillisecondTimer(250);
--   DrawUnifiedTerminalDashboard();
--   if(g_showSentimentHUD) DrawSentimentHUD();
--   ChartRedraw();
-+   ObjectsDeleteAll(0, PREFIX);
-+   // Bootstrap on a tick/timer only after symbol metadata is available.
-+   if(!EventSetTimer(1))
-+      PrintFormat("[SEGS INIT] Timer unavailable (%d); tick events will service the EA.", GetLastError());
- 
-    // Write initial heartbeat for this chart so other charts immediately recognize it as active
-    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
-@@ -1045,18 +1047,22 @@
- 
- void InitIndicatorHandles(string sym)
- {
--   if(sym == g_cachedHandleSymbol && g_cachedHandleSymbol != "") return;
-+   if(sym == g_cachedHandleSymbol && g_cachedHandleSymbol != "" &&
-+      g_hAtr_H1 != INVALID_HANDLE && g_hEma20_H1 != INVALID_HANDLE &&
-+      g_hEma50_H1 != INVALID_HANDLE && g_hEma20_H2 != INVALID_HANDLE &&
-+      g_hEma50_H2 != INVALID_HANDLE && g_hEma20_H4 != INVALID_HANDLE &&
-+      g_hEma50_H4 != INVALID_HANDLE) return;
- 
-    ReleaseIndicatorHandles();
- 
-    ResetLastError();
--   g_hAtr_H1   = iATR(sym, PERIOD_H1, InpATRPeriod);
--   g_hEma20_H1 = iMA(sym, PERIOD_H1, InpEMA20_Period, 0, MODE_EMA, PRICE_CLOSE);
--   g_hEma50_H1 = iMA(sym, PERIOD_H1, InpEMA50_Period, 0, MODE_EMA, PRICE_CLOSE);
--   g_hEma20_H2 = iMA(sym, PERIOD_H2, InpEMA20_Period, 0, MODE_EMA, PRICE_CLOSE);
--   g_hEma50_H2 = iMA(sym, PERIOD_H2, InpEMA50_Period, 0, MODE_EMA, PRICE_CLOSE);
--   g_hEma20_H4 = iMA(sym, PERIOD_H4, InpEMA20_Period, 0, MODE_EMA, PRICE_CLOSE);
--   g_hEma50_H4 = iMA(sym, PERIOD_H4, InpEMA50_Period, 0, MODE_EMA, PRICE_CLOSE);
-+   g_hAtr_H1   = iATR(sym, PERIOD_H1, MathMax(1, InpATRPeriod));
-+   g_hEma20_H1 = iMA(sym, PERIOD_H1, MathMax(1, InpEMA20_Period), 0, MODE_EMA, PRICE_CLOSE);
-+   g_hEma50_H1 = iMA(sym, PERIOD_H1, MathMax(1, InpEMA50_Period), 0, MODE_EMA, PRICE_CLOSE);
-+   g_hEma20_H2 = iMA(sym, PERIOD_H2, MathMax(1, InpEMA20_Period), 0, MODE_EMA, PRICE_CLOSE);
-+   g_hEma50_H2 = iMA(sym, PERIOD_H2, MathMax(1, InpEMA50_Period), 0, MODE_EMA, PRICE_CLOSE);
-+   g_hEma20_H4 = iMA(sym, PERIOD_H4, MathMax(1, InpEMA20_Period), 0, MODE_EMA, PRICE_CLOSE);
-+   g_hEma50_H4 = iMA(sym, PERIOD_H4, MathMax(1, InpEMA50_Period), 0, MODE_EMA, PRICE_CLOSE);
-    g_cachedHandleSymbol = sym;
- }
- 
-@@ -1129,6 +1135,9 @@
- 
- void OnDeinit(const int reason)
- {
-+   PrintFormat("[SEGS DEINIT] reason=%d, lastError=%d, symbol=%s, chart=%I64d", reason, GetLastError(), _Symbol, ChartID());
-+   g_runtimeReady = false;
-+   GlobalVariableDel("SEGS_HB_" + IntegerToString(ChartID()));
-    EventKillTimer();
-    ReleaseIndicatorHandles();
- 
-@@ -1165,8 +1174,9 @@
- //+------------------------------------------------------------------+
- //| Expert tick function                                             |
- //+------------------------------------------------------------------+
--void RunAdvisorStrategyEngine(bool forceScan=false, bool allowAutoTrade=true)
--{
-+void RunAdvisorStrategyEngine(bool forceScan, bool allowAutoTrade)
-+{
-+   if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
-    // Strategy engine runs independently of HUD visual toggle (Section 32, 47)
-    UpdateHTFLiquidityLevels(_Symbol);
-    UpdateM30OrderBlocks(forceScan);
-@@ -1180,6 +1190,7 @@
- 
- void OnTick()
- {
-+   if(!SEGSEnsureRuntimeReady()) return;
-    EnforcePositionStopLossAndTargets();
-    CheckBreakevenConditions();
-    CheckTrailingClose();
-@@ -1189,7 +1200,7 @@
-       ProcessUnassignedPositions();
- 
-    // Independent Strategy Evaluation on Tick
--   RunAdvisorStrategyEngine(false);
-+   RunAdvisorStrategyEngine(false, true);
- 
-    ulong nowMs = GetTickCount64();
-    if(nowMs - g_lastTickUpdateTime >= 200)
-@@ -1206,6 +1217,7 @@
- //+------------------------------------------------------------------+
- void OnTimer()
- {
-+   if(!SEGSEnsureRuntimeReady()) return;
-    // 1. Maintain Chart Heartbeat and ensure chart keyboard messages route to EA
-    long myChartId = ChartID();
-    GlobalVariableSet("SEGS_HB_" + IntegerToString(myChartId), (double)TimeCurrent());
-@@ -1218,6 +1230,7 @@
-       if(sysDash != g_isDashboardVisible)
-       {
-          g_isDashboardVisible = sysDash;
-+         GlobalVariableSet("SEGS_DASH_VIS_" + IntegerToString(ChartID()), sysDash ? 1.0 : 0.0);
-          if(!g_isDashboardVisible) DeleteTerminalObjects();
-          DrawUnifiedTerminalDashboard();
-          ChartRedraw();
-@@ -1242,7 +1255,7 @@
-    EnforcePositionStopLossAndTargets();
-    CheckBreakevenConditions();
-    CheckTrailingClose();
--   RunAdvisorStrategyEngine(false);
-+   RunAdvisorStrategyEngine(false, true);
-    DrawUnifiedTerminalDashboard();
-    if(g_showSentimentHUD) DrawSentimentHUD();
-    if(g_showOpenTradeMarkings) UpdateOpenTradeMarkings();
-@@ -1796,6 +1809,10 @@
- double GetPipSize(string sym)
- {
-    double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
-+   // Display-only fallback is derived from this symbol's precision, never _Point.
-+   // Execution paths separately require real broker point and tick metadata.
-+   if(!MathIsValidNumber(pt) || pt <= 0.0)
-+      pt = MathPow(10.0, -(int)MathMax(0, MathMin(8, SymbolInfoInteger(sym, SYMBOL_DIGITS))));
-    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-    string upperSym = sym;
-    StringToUpper(upperSym);
-@@ -3273,7 +3290,7 @@
- 
-    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-    double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
--   double pipSize = (digits == 3 || digits == 5) ? (10.0 * pt) : (digits == 1 ? (10.0 * pt) : pt);
-+   double pipSize = GetPipSize(_Symbol);
-    if(pipSize <= 0.0) pipSize = 0.0001;
- 
-    string activeObjects[];
-@@ -7443,127 +7460,68 @@
- //| 2. Multi-Day Swing Low / High if safer structural anchor         |
- //| 3. Minimum broker stop distance and tick-size normalization      |
- //+------------------------------------------------------------------+
-+void SEGSAddStopAnchor(double value, bool buy, double entry, double floorOrCeiling,
-+                       double proximity, double &extreme, double &nearby)
-+{
-+   if(!MathIsValidNumber(value) || value <= 0.0 || (buy ? value >= entry : value <= entry)) return;
-+   if(extreme == 0.0 || (buy ? value < extreme : value > extreme)) extreme = value;
-+   bool beyond = buy ? value < floorOrCeiling : value > floorOrCeiling;
-+   if(floorOrCeiling > 0.0 && beyond && MathAbs(value - floorOrCeiling) <= proximity &&
-+      (nearby == 0.0 || (buy ? value < nearby : value > nearby))) nearby = value;
-+}
-+
- double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, double obZoneLow, double obZoneHigh, double curAtr, bool preferMultiDay=false)
- {
-+   if((dir != "BUY" && dir != "SELL") || !MathIsValidNumber(entryPrice) || entryPrice <= 0.0 ||
-+      !SEGSMarketReady(sym)) return 0.0;
-+   bool buy = (dir == "BUY");
-+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
-+   double tick = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
-    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
--   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
--   if(pt <= 0.0) pt = (_Point > 0.0 ? _Point : 0.00001);
--   double pipSize = GetPipSize(sym);
--   if(pipSize <= 0.0) pipSize = pt * 10.0;
--   long stopLevel = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
--   double minBrokerStopDist = (double)stopLevel * pt;
--   if(minBrokerStopDist < pt) minBrokerStopDist = pt;
--   double minSafeDist = MathMax(minBrokerStopDist + 2.0 * pt, MathMax(5.0 * pipSize, 0.15 * curAtr));
--
--   bool isBuy = (dir == "BUY");
--
--   if(isBuy)
--   {
--      double atrBuffer = MathMax(0.20 * curAtr, MathMax(3.0 * pipSize, 3.0 * pt));
--
--      // 1. Order Block Floor (immediate zone invalidation)
--      double obBaseSL = (obZoneLow > 0.0 && obZoneLow < entryPrice) ? NormalizeDouble(obZoneLow - atrBuffer, digits) : 0.0;
--
--      // 2. Multi-Day Swing Low (over recent 2 to 5 daily bars + H4 bars)
--      double multiDayLow = 9999999.0;
--      for(int d = 1; d <= 5; d++)
--      {
--         double lowD = iLow(sym, PERIOD_D1, d);
--         if(lowD > 0.0 && lowD < multiDayLow) multiDayLow = lowD;
--      }
--      for(int b = 1; b <= 24; b++)
--      {
--         double lowH4 = iLow(sym, PERIOD_H4, b);
--         if(lowH4 > 0.0 && lowH4 < multiDayLow) multiDayLow = lowH4;
--      }
--      if(g_htfLiquidity.pdl > 0.0 && g_htfLiquidity.pdl < multiDayLow) multiDayLow = g_htfLiquidity.pdl;
--      if(g_htfLiquidity.pwl > 0.0 && g_htfLiquidity.pwl < multiDayLow) multiDayLow = g_htfLiquidity.pwl;
--      if(g_recentSwingLow > 0.0 && g_recentSwingLow < multiDayLow) multiDayLow = g_recentSwingLow;
--      if(g_recentSupport > 0.0 && g_recentSupport < multiDayLow) multiDayLow = g_recentSupport;
--
--      double multiDaySL = (multiDayLow > 0.0 && multiDayLow < entryPrice) ? NormalizeDouble(multiDayLow - atrBuffer, digits) : 0.0;
--
--      double chosenSL = 0.0;
--      if(obBaseSL > 0.0 && !preferMultiDay)
--      {
--         chosenSL = obBaseSL;
--         // If multi-day swing low sits just below the OB floor, allow multi-day swing low as safest invalidation point!
--         if(multiDaySL > 0.0 && multiDaySL < obBaseSL && (obBaseSL - multiDaySL) <= MathMax(0.85 * curAtr, 35.0 * pipSize))
--         {
--            chosenSL = multiDaySL;
--         }
--      }
--      else if(multiDaySL > 0.0)
--      {
--         chosenSL = multiDaySL;
--      }
--      else if(obBaseSL > 0.0)
--      {
--         chosenSL = obBaseSL;
--      }
--      else
--      {
--         chosenSL = entryPrice - minSafeDist;
--      }
--
--      if(chosenSL >= entryPrice - minBrokerStopDist || chosenSL <= 0.0)
--         chosenSL = entryPrice - minSafeDist;
--
--      return NormalizeDouble(NormalizePriceToTickSize(sym, chosenSL), digits);
--   }
--   else // SELL
--   {
--      double atrBuffer = MathMax(0.20 * curAtr, MathMax(3.0 * pipSize, 3.0 * pt));
--
--      // 1. Order Block Ceiling (immediate zone invalidation)
--      double obCeilSL = (obZoneHigh > 0.0 && obZoneHigh > entryPrice) ? NormalizeDouble(obZoneHigh + atrBuffer, digits) : 0.0;
--
--      // 2. Multi-Day Swing High (over recent 2 to 5 daily bars + H4 bars)
--      double multiDayHigh = 0.0;
--      for(int d = 1; d <= 5; d++)
--      {
--         double highD = iHigh(sym, PERIOD_D1, d);
--         if(highD > multiDayHigh) multiDayHigh = highD;
--      }
--      for(int b = 1; b <= 24; b++)
--      {
--         double highH4 = iHigh(sym, PERIOD_H4, b);
--         if(highH4 > multiDayHigh) multiDayHigh = highH4;
--      }
--      if(g_htfLiquidity.pdh > 0.0 && g_htfLiquidity.pdh > multiDayHigh) multiDayHigh = g_htfLiquidity.pdh;
--      if(g_htfLiquidity.pwh > 0.0 && g_htfLiquidity.pwh > multiDayHigh) multiDayHigh = g_htfLiquidity.pwh;
--      if(g_recentSwingHigh > 0.0 && g_recentSwingHigh > multiDayHigh) multiDayHigh = g_recentSwingHigh;
--      if(g_recentResistance > 0.0 && g_recentResistance < 9999998.0 && g_recentResistance > multiDayHigh) multiDayHigh = g_recentResistance;
--
--      double multiDaySL = (multiDayHigh > entryPrice) ? NormalizeDouble(multiDayHigh + atrBuffer, digits) : 0.0;
--
--      double chosenSL = 0.0;
--      if(obCeilSL > 0.0 && !preferMultiDay)
--      {
--         chosenSL = obCeilSL;
--         if(multiDaySL > 0.0 && multiDaySL > obCeilSL && (multiDaySL - obCeilSL) <= MathMax(0.85 * curAtr, 35.0 * pipSize))
--         {
--            chosenSL = multiDaySL;
--         }
--      }
--      else if(multiDaySL > 0.0)
--      {
--         chosenSL = multiDaySL;
--      }
--      else if(obCeilSL > 0.0)
--      {
--         chosenSL = obCeilSL;
--      }
--      else
--      {
--         chosenSL = entryPrice + minSafeDist;
--      }
--
--      if(chosenSL <= entryPrice + minBrokerStopDist || chosenSL <= 0.0)
--         chosenSL = entryPrice + minSafeDist;
--
--      return NormalizeDouble(NormalizePriceToTickSize(sym, chosenSL), digits);
--   }
-+   double atr = MathIsValidNumber(curAtr) ? MathMax(0.0, curAtr) : 0.0;
-+   double buffer = MathMax(MathMax(0.0, InpStructuralBufferATR) * atr, 3.0 * tick);
-+   double proximity = MathMax(MathMax(0.0, InpDualProximityATR) * atr, 6.0 * tick);
-+   bool validOB = MathIsValidNumber(obZoneLow) && MathIsValidNumber(obZoneHigh) &&
-+                  obZoneLow > 0.0 && obZoneHigh > obZoneLow &&
-+                  (buy ? obZoneLow < entryPrice : obZoneHigh > entryPrice);
-+   double boundary = validOB ? (buy ? obZoneLow : obZoneHigh) : 0.0;
-+   double extreme = 0.0, nearby = 0.0;
-+   for(int d = 1; d <= 5; d++)
-+      SEGSAddStopAnchor(buy ? iLow(sym, PERIOD_D1, d) : iHigh(sym, PERIOD_D1, d),
-+                        buy, entryPrice, boundary, proximity, extreme, nearby);
-+   for(int h = 2; h <= 24; h++)
+@@ -924,0 +959,5 @@
++   static ulong nextRetryMs = 0;
++   ulong now = GetTickCount64();
++   if(!g_runtimeReady && now < nextRetryMs) return false;
++   nextRetryMs = now + 1000;
++   SEGSSyncStopSettings();
+@@ -925,0 +965,13 @@
++   ENUM_TIMEFRAMES frames[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4, PERIOD_D1, PERIOD_W1};
++   int minimums[] = {45, 25, 25, 60, 60, 60, 30, 6, 2};
++   for(int i = 0; i < ArraySize(frames); i++)
 +   {
-+      double v = buy ? iLow(sym, PERIOD_H4, h) : iHigh(sym, PERIOD_H4, h);
-+      double left = buy ? iLow(sym, PERIOD_H4, h+1) : iHigh(sym, PERIOD_H4, h+1);
-+      double right = buy ? iLow(sym, PERIOD_H4, h-1) : iHigh(sym, PERIOD_H4, h-1);
-+      if(left > 0.0 && right > 0.0 && (buy ? (v <= left && v <= right) : (v >= left && v >= right)))
-+         SEGSAddStopAnchor(v, buy, entryPrice, boundary, proximity, extreme, nearby);
++      if(!SeriesInfoInteger(_Symbol, frames[i], SERIES_SYNCHRONIZED) || iBars(_Symbol, frames[i]) < minimums[i])
++      {
++         Comment("SEGS: waiting for synchronized chart history; EA remains attached.");
++         return false;
++      }
 +   }
-+   SEGSAddStopAnchor(buy ? iLow(sym, PERIOD_D1, 1) : iHigh(sym, PERIOD_D1, 1), buy, entryPrice, boundary, proximity, extreme, nearby);
-+   SEGSAddStopAnchor(buy ? iLow(sym, PERIOD_W1, 1) : iHigh(sym, PERIOD_W1, 1), buy, entryPrice, boundary, proximity, extreme, nearby);
-+   // Global structure belongs to this chart symbol only.
-+   if(sym == _Symbol)
++   int handles[] = {g_hAtr_H1, g_hEma20_H1, g_hEma50_H1, g_hEma20_H2, g_hEma50_H2, g_hEma20_H4, g_hEma50_H4};
++   for(int h = 0; h < ArraySize(handles); h++)
++      if(handles[h] == INVALID_HANDLE || BarsCalculated(handles[h]) < 3) return false;
+@@ -930,0 +983 @@
++      Comment("");
+@@ -940 +993,2 @@
+-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.50 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
++   SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
++   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.72 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+@@ -1027 +1081 @@
+-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.50 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
++   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.72 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+@@ -1176,0 +1231,55 @@
++void SEGSCalibrateActiveZoneProtection()
++{
++   if(g_systemStopStyle != SL_STYLE_ACTIVE_ORDER_BLOCK || !SEGSMarketReady(_Symbol)) return;
++   double atr = 0.0, values[];
++   if(g_hAtr_H1 == INVALID_HANDLE || CopyBuffer(g_hAtr_H1, 0, 1, 1, values) != 1) return;
++   atr = values[0];
++   if(!MathIsValidNumber(atr) || atr <= 0.0) return;
++   double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
++   if(g_systemTrailOB && TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && MQLInfoInteger(MQL_TRADE_ALLOWED))
 +   {
-+      SEGSAddStopAnchor(buy ? g_recentSwingLow : g_recentSwingHigh, buy, entryPrice, boundary, proximity, extreme, nearby);
-+      SEGSAddStopAnchor(buy ? g_recentSupport : g_recentResistance, buy, entryPrice, boundary, proximity, extreme, nearby);
++      for(int i = PositionsTotal() - 1; i >= 0; i--)
++      {
++         ulong ticket = PositionGetTicket(i);
++         if(ticket == 0 || !posInfo.SelectByTicket(ticket) || posInfo.Symbol() != _Symbol) continue;
++         if(posInfo.Magic() != InpAdvisorMagicNumber && StringFind(posInfo.Comment(), "SEGS|ADV") < 0) continue;
++         bool buy = posInfo.PositionType() == POSITION_TYPE_BUY;
++         double market = SymbolInfoDouble(_Symbol, buy ? SYMBOL_BID : SYMBOL_ASK);
++         double stop = GetSafestStructuralStopLoss(_Symbol, buy ? "BUY" : "SELL", market, 0.0, 0.0, atr);
++         double oldSL = posInfo.StopLoss();
++         if(stop <= 0.0 || (oldSL > 0.0 && (buy ? stop <= oldSL + tick : stop >= oldSL - tick))) continue;
++         if(ValidateProtectionTarget(_Symbol, posInfo.PositionType(), market, stop, true) != 1) continue;
++         if(trade.PositionModify(ticket, stop, posInfo.TakeProfit()) && trade.ResultRetcode() == TRADE_RETCODE_DONE)
++            PrintFormat("[SEGS STRUCTURAL TRAIL] %s ticket=%I64u oldSL=%.8f newSL=%.8f", _Symbol, ticket, oldSL, stop);
++      }
 +   }
-+   ENUM_SEGS_SL_STYLE style = InpStructuralStopStyle;
-+   if(preferMultiDay && style == SL_STYLE_AUTO_DUAL) style = SL_STYLE_MULTI_DAY;
-+   double anchor = 0.0;
-+   if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
-+   else if(style == SL_STYLE_MULTI_DAY) anchor = extreme;
-+   else anchor = validOB ? (nearby > 0.0 ? nearby : boundary) : extreme;
-+   // No fabricated structural stop: caller must defer when the required anchor is absent.
-+   if(anchor <= 0.0) return 0.0;
-+   double stop = buy ? anchor - buffer : anchor + buffer;
-+   MqlTick quote;
-+   if(!SymbolInfoTick(sym, quote)) return 0.0;
-+   double distance = MathMax((double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * pt, tick) + 2.0 * tick;
-+   if(buy) stop = MathMin(stop, MathMin(entryPrice, quote.bid) - distance);
-+   else stop = MathMax(stop, MathMax(entryPrice, quote.ask) + distance);
-+   // Round away from invalidation, never towards the OB or broker boundary.
-+   stop = (buy ? MathFloor(stop / tick) : MathCeil(stop / tick)) * tick;
-+   return stop > 0.0 ? NormalizeDouble(stop, digits) : 0.0;
- }
- 
- //+------------------------------------------------------------------+
-@@ -9223,6 +9181,7 @@
- //+------------------------------------------------------------------+
- double CalculateDirectEMA(string sym, ENUM_TIMEFRAMES tf, int period, int shift=1)
- {
-+   if(period < 1 || shift < 0) return 0.0;
-    int available = iBars(sym, tf);
-    if(available < period + shift) return 0.0;
-    int barsToScan = MathMin(period * 3, available - shift);
-@@ -10383,6 +10342,7 @@
-          double obL = (g_obSignalLow > 0.0) ? g_obSignalLow : 0.0;
-          double obH = (g_obSignalHigh > 0.0) ? g_obSignalHigh : 0.0;
-          g_staticSL = GetSafestStructuralStopLoss(sym, activeTradeDir, g_staticEntryPrice, obL, obH, curAtr, false);
-+         if(g_staticSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
-       }
-       long stopLevel = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
-       double minStopDist = (double)stopLevel * pt;
-@@ -11019,6 +10979,7 @@
-       }
- 
-       candSL = GetSafestStructuralStopLoss(sym, "BUY", candEntry, obBottom, obTop, curAtr, false);
-+      if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
-       
-       double candTP1 = 0.0, candTP2 = 0.0, candTP3 = 0.0, candTP4 = 0.0;
-       double rrTP2 = 0.0, rrWeighted = 0.0;
-@@ -11319,7 +11280,8 @@
- 
-       double candEntryH1 = (h1Dir == "BUY") ? g_obSignalHigh : g_obSignalLow;
-       double obBuffer = MathMax(0.20 * curAtr, 6.0 * pipSize);
--      double candSL_H1 = (h1Dir == "BUY") ? (g_obSignalLow - obBuffer) : (g_obSignalHigh + obBuffer);
-+      double candSL_H1 = GetSafestStructuralStopLoss(sym, h1Dir, candEntryH1, g_obSignalLow, g_obSignalHigh, curAtr);
-+      if(candSL_H1 <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
- 
-       double minRisk = MathMax(18.0 * pipSize, 0.40 * curAtr);
-       if(h1Dir == "BUY" && (candEntryH1 - candSL_H1) < minRisk) candSL_H1 = candEntryH1 - minRisk;
-@@ -11478,7 +11440,8 @@
-             }
-          }
- 
--         double candSL    = (obDir == "BUY") ? (g_obSignalLow - obBuffer) : (g_obSignalHigh + obBuffer);
-+         double candSL    = GetSafestStructuralStopLoss(sym, obDir, candEntry, g_obSignalLow, g_obSignalHigh, curAtr);
-+         if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
- 
-          double minRisk = MathMax(18.0 * pipSize, 0.40 * curAtr);
-          if(obDir == "BUY" && (candEntry - candSL) < minRisk) candSL = candEntry - minRisk;
-@@ -12177,6 +12140,7 @@
-          // or at multi-day swing low where necessary as the safest invalidation floor!
-          candEntry = targetPlannedEntry;
-          candSL = GetSafestStructuralStopLoss(sym, "BUY", candEntry, g_obSignalLow, g_obSignalHigh, curAtr, false);
-+         if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
-          // Precision Buy Zone Enforcement: The candle base extension above the Demand Order Block (or deeper retracement during Toronto window) is the primary planned entry trigger point!
-          double zoneEntryTol = MathMax((double)SymbolInfoInteger(sym, SYMBOL_SPREAD) * SymbolInfoDouble(sym, SYMBOL_POINT) * 2.0, 3.0 * pipSize);
-          double maxAllowedDrift = MathMax(InpMaxEntryDriftATR * curAtr, 15.0 * pipSize);
-@@ -12337,6 +12301,7 @@
-          double touchTolBuy = MathMax(0.30 * curAtr, 10.0 * pipSize);
-          candEntry = structuralEntry;
-          candSL = GetSafestStructuralStopLoss(sym, "BUY", candEntry, g_obSignalLow, g_obSignalHigh, curAtr, true);
-+         if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
-          // Check if price touched or penetrated the planned entry at Support:
-          double l0_M1 = iLow(sym, PERIOD_M1, 0), l1_M1 = iLow(sym, PERIOD_M1, 1);
-          double l0_M5 = iLow(sym, PERIOD_M5, 0), l1_M5 = iLow(sym, PERIOD_M5, 1);
-@@ -12393,11 +12358,14 @@
-             : ((g_obSignalLow > 0.0) ? g_obSignalLow : curPrice);
- 
-          candEntry = targetPlannedEntry;
--         double fewPipsSell = isGold ? 4.29 : MathMax(3.0 * pipSize, obBuffer);
-+         double fewPipsSell = MathMax(3.0 * pipSize, obBuffer);
-          candSL = (g_obSignalHigh > 0.0) ? NormalizeDouble(g_obSignalHigh + fewPipsSell, digits) : (candEntry + MathMax(isGold ? 35.0 * pipSize : 18.0 * pipSize, isGold ? 0.60 * curAtr : 0.40 * curAtr));
-          double minRisk = MathMax(isGold ? 35.0 * pipSize : 18.0 * pipSize, isGold ? 0.60 * curAtr : 0.40 * curAtr);
-          if(candSL - candEntry < minRisk) candSL = candEntry + minRisk;
-          if(g_obSignalHigh > 0.0 && candSL <= g_obSignalHigh) candSL = g_obSignalHigh + fewPipsSell;
-+
-+         candSL = GetSafestStructuralStopLoss(sym, "SELL", candEntry, g_obSignalLow, g_obSignalHigh, curAtr);
-+         if(candSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
- 
-          // Precision Sell Zone Enforcement: The candle base extension below the Supply Order Block (or deeper retracement during Toronto window) is the primary planned entry trigger point!
-          double zoneEntryTol = MathMax((double)SymbolInfoInteger(sym, SYMBOL_SPREAD) * SymbolInfoDouble(sym, SYMBOL_POINT) * 2.0, 3.0 * pipSize);
-@@ -13484,6 +13452,7 @@
- //+------------------------------------------------------------------+
- void ExecuteAdvisedTrade(bool isAutoTrade=false)
- {
-+   if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
-    string sym = _Symbol;
- 
-    // Anti-Spam Rapid-Fire Throttle: at least 15s between order bursts (bypassed on TRIGGERED auto execution)
-@@ -13789,6 +13758,28 @@
-       ReleaseAccountLock("ADVISOR_EXEC");
-       return;
-    }
-+   // Finalize structural protection BEFORE risk sizing; use the same stop for every leg.
-+   if(!SEGSMarketReady(sym))
++   string activeDir; double entry=0.0, stop=0.0, t1=0.0,t2=0.0,t3=0.0,t4=0.0; int count=0;
++   if(GetOpenAdvisorTradeDetails(_Symbol, activeDir, entry, stop, t1,t2,t3,t4,count))
 +   {
-+      g_blockReason = "WAITING FOR SYMBOL METADATA";
-+      ReleaseAccountLock("ADVISOR_EXEC");
++      g_staticSL = stop; // Actual broker stop, including profitable trailing stops above/below entry.
++      UpdateTradeAdviceLines();
 +      return;
 +   }
-+   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
-+   double minStopDist = MathMax((double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * pt, pt);
-+   double pipSize = GetPipSize(sym);
-+   double minSafeStopDist = MathMax(minStopDist + 2.0 * pt, 0.15 * curAtr);
-+   bool stopOB = g_obSignalDirection == g_currentAdvisedAction;
-+   double finalStop = GetSafestStructuralStopLoss(sym, g_currentAdvisedAction, curPrice,
-+      stopOB ? g_obSignalLow : 0.0, stopOB ? g_obSignalHigh : 0.0, curAtr, !stopOB);
-+   if(finalStop <= 0.0)
++   string dir = g_currentAdvisedAction;
++   if(dir != "BUY" && dir != "SELL") dir = g_plannedAction;
++   if(dir != "BUY" && dir != "SELL") return;
++   double quote = SymbolInfoDouble(_Symbol, dir == "BUY" ? SYMBOL_ASK : SYMBOL_BID);
++   double calibrated = GetSafestStructuralStopLoss(_Symbol, dir, quote, 0.0, 0.0, atr);
++   if(calibrated <= 0.0) { g_hasViableEntry=false; g_blockReason="WAITING FOR ACTIVE ORDER BLOCK"; return; }
++   if(g_staticEntryPrice <= 0.0 || (dir == "BUY" ? calibrated >= g_staticEntryPrice : calibrated <= g_staticEntryPrice))
 +   {
-+      g_blockReason = "WAITING FOR VALID STRUCTURAL STOP ANCHOR";
-+      ReleaseAccountLock("ADVISOR_EXEC");
-+      return;
++      // The old plan is incompatible with current active structure. Show a current preview,
++      // requiring the normal scanner to validate a fresh signal before any order is sent.
++      g_staticEntryPrice = quote;
++      g_hasViableEntry = false; g_currentTradeTaken = false;
++      g_setupState = "WATCHING";
++      g_blockReason = "ACTIVE ZONE UPDATED: AWAITING FRESH ENTRY CONFIRMATION";
++      g_currentSignalID = "";
++      ClearActiveSignalSnapshot(_Symbol);
 +   }
-+   g_staticSL = finalStop;
++   g_staticSL = calibrated;
++   BuildStructuralTargets(_Symbol, dir, g_staticEntryPrice, calibrated, atr,
++      g_staticTP1,g_staticTP2,g_staticTP3,g_staticTP4,g_rrTP2,g_rrWeighted);
++   UpdateTradeAdviceLines();
++}
 +
-    double totalLot = 0.0;
-    if(g_smartLotEnabled)
-    {
-@@ -13833,81 +13824,6 @@
-       g_blockReason = "INSUFFICIENT FREE MARGIN";
-       ReleaseAccountLock("ADVISOR_EXEC");
-       return;
--   }
+@@ -1179,0 +1289,4 @@
++   static ulong nextScanMs = 0;
++   ulong scanNowMs = GetTickCount64();
++   if(!forceScan && scanNowMs < nextScanMs) return;
++   nextScanMs = scanNowMs + 1000;
+@@ -1180,0 +1294 @@
++   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 2.0);
+@@ -1183,0 +1298 @@
++   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 3.0);
+@@ -1184,0 +1300 @@
++   SEGSCalibrateActiveZoneProtection();
+@@ -1193,0 +1310 @@
++   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 1.0);
+@@ -1254,0 +1372 @@
++   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 1.0);
+@@ -1258,0 +1377 @@
++   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 4.0);
+@@ -1270,0 +1390 @@
++   if(!g_runtimeReady) return; // Startup reconstruction recovers trades once history is ready.
+@@ -2544 +2664 @@
+-      double targetTP = (curTP > 0.0) ? curTP : (isBuy ? (entry + (tpPips[leg - 1] * pipSize)) : (entry - (tpPips[leg - 1] * pipSize)));
++      double targetTP = (curTP > 0.0) ? curTP : (isBuy ? (entry + (tpPips[MathMax(1, MathMin(4, leg)) - 1] * pipSize)) : (entry - (tpPips[MathMax(1, MathMin(4, leg)) - 1] * pipSize)));
+@@ -6144 +6264 @@
+-      if((outSL <= 0.0 || MathAbs(outSL - outEntry) < 2.0 * pt) && rSL > 0.0) outSL = rSL;
++      if(outSL <= 0.0 && rSL > 0.0) outSL = rSL;
+@@ -6152 +6272 @@
+-   if(outSL <= 0.0 || MathAbs(outSL - outEntry) < minSafeDist)
++   if(outSL <= 0.0)
+@@ -6863 +6982,0 @@
+-   bool isGBPUSD = IsSymbolMatch(cleanSym, InpGU_Patterns) || (StringFind(cleanSym, "GBPUSD") >= 0);
+@@ -6918,7 +7036,0 @@
 -
--   // 12. Adjust Stops to satisfy broker stop level, freeze level, and safety floor
--   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
--   long stopLevel = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
--   double minStopDist = (double)stopLevel * pt;
--   if(minStopDist < pt) minStopDist = pt;
--   double pipSize = GetPipSize(sym);
--   double minSafeStopDist = MathMax(minStopDist + 2.0 * pt, MathMax(5.0 * pipSize, 0.15 * curAtr));
--
--   bool isOBConfluent = (g_obSignalDirection == "BUY" || g_obSignalDirection == "SELL");
--
--   if(g_currentAdvisedAction == "BUY")
--   {
--      bool isGold = IsSymbolMatch(sym, InpXAU_Patterns);
--      double tightAllowance = isGold ? 4.29 : MathMax(3.0 * pipSize, 0.20 * curAtr);
--      
--      // System-Level Rule 1: Order Block entries -> Stop Loss strictly at bottom of Order Block (+ few pips allowance)
--      if((g_activeEntryStrategy == "ORDER_BLOCK" || isOBConfluent) && g_obSignalLow > 0.0 && g_obSignalLow < curPrice)
+-      // 6. Specific Achievable Target Calibration for GBPUSD (User Screenshot: TP2 = 1.33200, TP3 = 1.33690)
+-      if(isGBPUSD && entryPrice >= 1.32000 && entryPrice <= 1.32800)
 -      {
--         g_staticSL = NormalizeDouble(g_obSignalLow - tightAllowance, digits);
+-         if(candCount < 40) candLevels[candCount++] = 1.33200; // 1-2 Day Intermediate Swing Resistance
+-         if(candCount < 42) candLevels[candCount++] = 1.33690; // 2-3 Day Major Supply Ceiling
 -      }
--      else if(g_staticSL > 0.0 && g_staticSL < curPrice - minStopDist)
--      {
--         // System-Level Rule 2: Preserve planned Stop Loss (including multi-day swing low when selected as safest anchor)
--      }
--      else
--      {
--         // Multi-Day Swing setups: Anchor to safest multi-day swing low / support
--         double safestBaseLow = curPrice - minSafeStopDist;
--         if(g_recentSupport > 0.0 && g_recentSupport < curPrice) safestBaseLow = g_recentSupport;
--         if(g_recentSwingLow > 0.0 && g_recentSwingLow < curPrice && g_recentSwingLow < safestBaseLow) safestBaseLow = g_recentSwingLow;
--         if(g_htfLiquidity.pdl > 0.0 && g_htfLiquidity.pdl < curPrice && g_htfLiquidity.pdl < safestBaseLow) safestBaseLow = g_htfLiquidity.pdl;
--         if(g_htfLiquidity.pwl > 0.0 && g_htfLiquidity.pwl < curPrice && g_htfLiquidity.pwl < safestBaseLow) safestBaseLow = g_htfLiquidity.pwl;
--         
--         g_staticSL = NormalizeDouble(safestBaseLow - 2.0 * pt, digits);
--      }
--
--      g_staticSL = NormalizePriceToTickSize(sym, g_staticSL);
--
--      // Mandatory Invariant: Buy Stop Loss MUST NEVER equal or exceed Entry!
--      if(g_staticSL >= curPrice - minStopDist)
--         g_staticSL = NormalizePriceToTickSize(sym, NormalizeDouble(curPrice - minSafeStopDist, digits));
--   }
--   else // SELL
--   {
--      bool isGold = IsSymbolMatch(sym, InpXAU_Patterns);
--      double tightAllowance = isGold ? 4.29 : MathMax(3.0 * pipSize, 0.20 * curAtr);
--      
--      // System-Level Rule 1: Order Block entries -> Stop Loss strictly at top of Order Block (+ few pips allowance)
--      if((g_activeEntryStrategy == "ORDER_BLOCK" || isOBConfluent) && g_obSignalHigh > 0.0 && g_obSignalHigh > curPrice)
--      {
--         g_staticSL = NormalizeDouble(g_obSignalHigh + tightAllowance, digits);
--      }
--      else if(g_staticSL > 0.0 && g_staticSL > curPrice + minStopDist)
--      {
--         // System-Level Rule 2: Preserve planned Stop Loss (including multi-day swing high when selected as safest anchor)
--      }
--      else
--      {
--         // Multi-Day Swing setups: Anchor to safest multi-day swing high / resistance
--         double safestBaseHigh = curPrice + minSafeStopDist;
--         if(g_recentResistance > 0.0 && g_recentResistance > curPrice) safestBaseHigh = g_recentResistance;
--         if(g_recentSwingHigh > 0.0 && g_recentSwingHigh > curPrice && g_recentSwingHigh > safestBaseHigh) safestBaseHigh = g_recentSwingHigh;
--         if(g_htfLiquidity.pdh > 0.0 && g_htfLiquidity.pdh > curPrice && g_htfLiquidity.pdh > safestBaseHigh) safestBaseHigh = g_htfLiquidity.pdh;
--         if(g_htfLiquidity.pwh > 0.0 && g_htfLiquidity.pwh > curPrice && g_htfLiquidity.pwh > safestBaseHigh) safestBaseHigh = g_htfLiquidity.pwh;
--         
--         g_staticSL = NormalizeDouble(safestBaseHigh + 2.0 * pt, digits);
--      }
--
--      g_staticSL = NormalizePriceToTickSize(sym, g_staticSL);
--
--      // Mandatory Invariant: Sell Stop Loss MUST NEVER equal or go below Entry!
--      if(g_staticSL <= curPrice + minStopDist || (g_staticSL - curPrice) < minSafeStopDist)
--         g_staticSL = NormalizePriceToTickSize(sym, NormalizeDouble(curPrice + minSafeStopDist, digits));
-    }
- 
-    double riskDist = MathAbs(curPrice - g_staticSL);
-@@ -14001,7 +13917,11 @@
-       // Pre-validate SL and TP levels against current live price to ensure zero invalid stop rejections
-       double legSL = g_staticSL;
-       double legTP = targetTP;
--      ValidateProtectionLevels(sym, ptype, sendPrice, legSL, legTP);
-+      if(legSL <= 0.0 || !ValidateProtectionLevels(sym, ptype, sendPrice, legSL, legTP))
+@@ -7148 +7260,2 @@
+-   ArrayResize(outLots, legsToOpen);
++   if(legsToOpen < 1 || legsToOpen > 4) { outErrorReason = "INVALID LEG COUNT"; return false; }
++   if(ArrayResize(outLots, legsToOpen) != legsToOpen) { outErrorReason = "LOT ALLOCATION FAILED"; return false; }
+@@ -7462,0 +7576,24 @@
++bool SEGSSelectActiveOrderBlock(string sym, bool buy, double price, double atr, double &low, double &high)
++{
++   low = 0.0; high = 0.0;
++   if(sym != _Symbol || !SEGSMarketReady(sym)) return false;
++   double maxDistance = MathMax(g_systemOBMaxDistanceATR * atr, 10.0 * SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE));
++   double bestDistance = DBL_MAX;
++   for(int tf = 0; tf < 2; tf++)
++   {
++      int count = tf == 0 ? ArraySize(g_orderBlocks) : ArraySize(g_h1OrderBlocks);
++      for(int i = 0; i < count; i++)
 +      {
-+         PrintFormat("[SEGS EXEC] Leg %d deferred: protection not valid at live quote", leg + 1);
-+         continue;
++         M30OrderBlock zone;
++         if(tf == 0) zone = g_orderBlocks[i]; else zone = g_h1OrderBlocks[i];
++         if(zone.invalidated || zone.bullish != buy || zone.low <= 0.0 || zone.high <= zone.low) continue;
++         double boundary = buy ? zone.low : zone.high;
++         if(buy ? boundary >= price : boundary <= price) continue;
++         double distance = MathAbs(price - boundary);
++         if(distance <= maxDistance && distance < bestDistance)
++         { low = zone.low; high = zone.high; bestDistance = distance; }
 +      }
- 
-       ResetLastError();
-       bool ok = false;
-@@ -14019,7 +13939,11 @@
-          sendPrice = (g_currentAdvisedAction == "BUY") ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID);
-          legSL = g_staticSL;
-          legTP = targetTP;
--         ValidateProtectionLevels(sym, ptype, sendPrice, legSL, legTP);
-+         if(legSL <= 0.0 || !ValidateProtectionLevels(sym, ptype, sendPrice, legSL, legTP))
-+      {
-+         PrintFormat("[SEGS EXEC] Leg %d deferred: protection not valid at live quote", leg + 1);
-+         continue;
-+      }
-          ResetLastError();
-          if(g_currentAdvisedAction == "BUY")
-             ok = trade.Buy(legLot, sym, sendPrice, legSL, legTP, comment);
-@@ -14028,38 +13952,10 @@
-          ret = trade.ResultRetcode();
-       }
- 
--      // Fallback B: Market Execution mode where stops cannot be attached on entry (retcode 10016)
--      if(!ok && (ret == 10016 || ret == TRADE_RETCODE_INVALID_STOPS))
--      {
--         sendPrice = (g_currentAdvisedAction == "BUY") ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID);
--         ResetLastError();
--         if(g_currentAdvisedAction == "BUY")
--            ok = trade.Buy(legLot, sym, sendPrice, 0.0, 0.0, comment);
--         else
--            ok = trade.Sell(legLot, sym, sendPrice, 0.0, 0.0, comment);
--         ret = trade.ResultRetcode();
--         if(ok && (ret == TRADE_RETCODE_DONE || ret == TRADE_RETCODE_PLACED))
--         {
--            ulong dealTk = trade.ResultDeal();
--            ulong posTk = 0; ulong posId = 0;
--            if(ResolvePositionTicketAndIdFromDeal(dealTk, sym, InpAdvisorMagicNumber, comment, posTk, posId))
--            {
--               actualPositionTickets[leg] = posTk;
--               actualPositionIds[leg]     = posId;
--               legSuccess[leg]            = true;
--               successCount++;
--
--               double modPrice = (g_currentAdvisedAction == "BUY") ? SymbolInfoDouble(sym, SYMBOL_BID) : SymbolInfoDouble(sym, SYMBOL_ASK);
--               double modSL = g_staticSL;
--               double modTP = targetTP;
--               if(ValidateProtectionLevels(sym, ptype, modPrice, modSL, modTP))
--               {
--                  trade.PositionModify(posTk, modSL, modTP);
--               }
--            }
--         }
--      }
--      else if(ok && (ret == TRADE_RETCODE_DONE || ret == TRADE_RETCODE_PLACED))
-+      // Invalid stops defer the trade; never retry with an unprotected market order.
-+      if(!ok && ret == TRADE_RETCODE_INVALID_STOPS)
-+         PrintFormat("[SEGS EXEC] Invalid stops on %s; awaiting a valid protected entry", sym);
-+      if(ok && (ret == TRADE_RETCODE_DONE || ret == TRADE_RETCODE_PLACED))
-       {
-          ulong dealTk = trade.ResultDeal();
-          ulong posTk = 0; ulong posId = 0;
-@@ -14142,6 +14038,7 @@
- 
- void CheckAndAutoTradeAdvice()
- {
-+   if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
-    // 1. Advisor Enabled check
-    if(!g_myAdvisorEnabled) return;
- 
-@@ -14479,8 +14376,8 @@
-    double tickSize = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
-    double tickVal  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
-    if(tickSize <= 0.0) tickSize = SymbolInfoDouble(sym, SYMBOL_POINT);
--   if(tickSize <= 0.0) tickSize = (_Point > 0.0 ? _Point : 0.00001);
--   if(tickVal <= 0.0) tickVal = 1.0;
-+   if(!MathIsValidNumber(tickSize) || tickSize <= 0.0 ||
-+      !MathIsValidNumber(tickVal) || tickVal <= 0.0) return 0.0;
- 
-    double diff = MathAbs(openPrice - sl);
-    return NormalizeDouble((diff / tickSize) * tickVal * lots, 2);
-@@ -14505,8 +14402,8 @@
-    double tickSize = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
-    double tickVal  = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE);
-    if(tickSize <= 0.0) tickSize = SymbolInfoDouble(sym, SYMBOL_POINT);
--   if(tickSize <= 0.0) tickSize = (_Point > 0.0 ? _Point : 0.00001);
--   if(tickVal <= 0.0) tickVal = 1.0;
-+   if(!MathIsValidNumber(tickSize) || tickSize <= 0.0 ||
-+      !MathIsValidNumber(tickVal) || tickVal <= 0.0) return 0.0;
- 
-    double diff = MathAbs(tp - openPrice);
-    return NormalizeDouble((diff / tickSize) * tickVal * lots, 2);
-@@ -14568,6 +14465,7 @@
-    double takeP = posInfo.TakeProfit();
- 
-    double pipSize = GetPipSize(sym);
-+   if(!MathIsValidNumber(pipSize) || pipSize <= 0.0) return tp;
- 
-    if(takeP > 0.0)
-    {
-@@ -15058,7 +14956,7 @@
-       // Render active advisor positions table
-       int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-       double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
--      double pipSize = (digits == 3 || digits == 5) ? (10.0 * pt) : (digits == 1 ? (10.0 * pt) : pt);
-+      double pipSize = GetPipSize(_Symbol);
-       if(pipSize <= 0.0) pipSize = 0.0001;
- 
-       int maxRows = MathMin(advPosCount, 3);
-@@ -17128,7 +17026,8 @@
-    double vol = posInfo.Volume();
-    double minLot = SymbolInfoDouble(posInfo.Symbol(), SYMBOL_VOLUME_MIN);
-    double lotStep = SymbolInfoDouble(posInfo.Symbol(), SYMBOL_VOLUME_STEP);
--   double closeVol = MathFloor((vol * fraction) / lotStep) * lotStep;
-+   if(!MathIsValidNumber(lotStep) || lotStep <= 0.0 || minLot <= 0.0 || fraction <= 0.0) return;
-+   double closeVol = MathFloor((vol * MathMin(1.0, fraction)) / lotStep) * lotStep;
-    if(closeVol >= minLot && closeVol < vol)
-       trade.PositionClosePartial(ticket, closeVol);
-    else if(closeVol >= vol)
-@@ -17350,6 +17249,9 @@
-             g_showWinRateHUD = (GlobalVariableGet("SEGS_SYS_WINRATE_VIS") > 0.5);
-          if(GlobalVariableCheck("SEGS_SYS_HELP_VIS"))
-             g_showHelpHUD = (GlobalVariableGet("SEGS_SYS_HELP_VIS") > 0.5);
-+         GlobalVariableSet("SEGS_DASH_VIS_" + IntegerToString(ChartID()), g_isDashboardVisible ? 1.0 : 0.0);
-+         if(!g_isDashboardVisible) DeleteTerminalObjects();
-+         if(!g_showSentimentHUD) ObjectsDeleteAll(0, PREFIX + "SNT_");
-          DrawUnifiedTerminalDashboard();
-          if(g_showSentimentHUD) DrawSentimentHUD();
-          if(g_showWinRateHUD) DrawWinRateHUD();
-@@ -17358,6 +17260,8 @@
-          return;
-       }
-    }
++   }
++   return low > 0.0;
++}
 +
+@@ -7508 +7645 @@
+-   ENUM_SEGS_SL_STYLE style = InpStructuralStopStyle;
++   ENUM_SEGS_SL_STYLE style = g_systemStopStyle;
+@@ -7511 +7648,8 @@
+-   if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
++   if(style == SL_STYLE_ACTIVE_ORDER_BLOCK)
++   {
++      double activeLow = 0.0, activeHigh = 0.0;
++      if(!SEGSSelectActiveOrderBlock(sym, buy, entryPrice, atr, activeLow, activeHigh)) return 0.0;
++      anchor = buy ? activeLow : activeHigh;
++      buffer = MathMax(g_systemOBBufferATR * atr, g_systemOBBufferTicks * tick);
++   }
++   else if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
+@@ -7533,0 +7678 @@
++   if(shift < 0 || period < 1 || shift >= ArraySize(r) - 1) return 0.0;
+@@ -7969 +8114 @@
+-   double atr15 = OBATRAt(m15, 1, InpOBATRPeriod);
++   double atr15 = OBATRAt(m15, 1, MathMax(1, MathMin(500, InpOBATRPeriod)));
+@@ -7974 +8119 @@
+-   double atr5 = (copied5 >= 16) ? OBATRAt(m5, 1, InpOBATRPeriod) : atr15 * 0.55;
++   double atr5 = (copied5 >= 16) ? OBATRAt(m5, 1, MathMax(1, MathMin(500, InpOBATRPeriod))) : atr15 * 0.55;
+@@ -8055,3 +8200,3 @@
+-   g_lastOBScanBarTime = currentBar;
+-
+-   int need = MathMax(InpOBLookbackBars, InpOBATRPeriod + InpOBSwingLookback + 30);
++
++
++   int need = MathMax(MathMax(20, MathMin(2000, InpOBLookbackBars)), MathMax(1, MathMin(500, InpOBATRPeriod)) + MathMax(1, MathMin(500, InpOBSwingLookback)) + 30);
+@@ -8061,2 +8206,5 @@
+-   if(copied < InpOBATRPeriod + InpOBSwingLookback + 10) return;
+-
++   if(copied < MathMax(1, MathMin(500, InpOBATRPeriod)) + MathMax(1, MathMin(500, InpOBSwingLookback)) + 10) return;
++   if(ArraySize(r) < copied || copied < 6) return;
++
++   g_lastOBScanBarTime = currentBar;
++   g_nearestBullishOB = -1; g_nearestBearishOB = -1;
+@@ -8064 +8212 @@
+-   int maxShift = MathMin(copied - InpOBATRPeriod - InpOBSwingLookback - 2, InpOBLookbackBars - 1);
++   int maxShift = MathMin(copied - MathMax(1, MathMin(500, InpOBATRPeriod)) - MathMax(1, MathMin(500, InpOBSwingLookback)) - 2, MathMax(20, MathMin(2000, InpOBLookbackBars)) - 1);
+@@ -8068 +8216 @@
+-      double atr = OBATRAt(r, i, InpOBATRPeriod);
++      double atr = OBATRAt(r, i, MathMax(1, MathMin(500, InpOBATRPeriod)));
+@@ -8084 +8232 @@
+-      for(int p = i + 1; p <= i + InpOBSwingLookback && p < copied; p++)
++      for(int p = i + 1; p <= i + MathMax(1, MathMin(500, InpOBSwingLookback)) && p < copied; p++)
+@@ -8492,3 +8640,3 @@
+-   g_lastH1OBScanBarTime = currentBar;
+-
+-   int need = MathMax(InpOBLookbackBars, InpOBATRPeriod + InpOBSwingLookback + 30);
++
++
++   int need = MathMax(MathMax(20, MathMin(2000, InpOBLookbackBars)), MathMax(1, MathMin(500, InpOBATRPeriod)) + MathMax(1, MathMin(500, InpOBSwingLookback)) + 30);
+@@ -8498,2 +8646,4 @@
+-   if(copied < InpOBATRPeriod + InpOBSwingLookback + 10) return;
+-
++   if(copied < MathMax(1, MathMin(500, InpOBATRPeriod)) + MathMax(1, MathMin(500, InpOBSwingLookback)) + 10) return;
++   if(ArraySize(r) < copied || copied < 6) return;
++
++   g_lastH1OBScanBarTime = currentBar;
+@@ -8501 +8651 @@
+-   int maxShift = MathMin(copied - InpOBATRPeriod - InpOBSwingLookback - 2, InpOBLookbackBars - 1);
++   int maxShift = MathMin(copied - MathMax(1, MathMin(500, InpOBATRPeriod)) - MathMax(1, MathMin(500, InpOBSwingLookback)) - 2, MathMax(20, MathMin(2000, InpOBLookbackBars)) - 1);
+@@ -8505 +8655 @@
+-      double atr = OBATRAt(r, i, InpOBATRPeriod);
++      double atr = OBATRAt(r, i, MathMax(1, MathMin(500, InpOBATRPeriod)));
+@@ -8519 +8669 @@
+-      for(int p = i + 1; p <= i + InpOBSwingLookback && p < copied; p++)
++      for(int p = i + 1; p <= i + MathMax(1, MathMin(500, InpOBSwingLookback)) && p < copied; p++)
+@@ -8898 +9048 @@
+-   else if(isPDLSweepActive || (g_nearestBullishOB >= 0 && g_distanceToDemand <= MathMax(1.5 * curAtr, 35.0 * pip)))
++   else if(isPDLSweepActive || (g_nearestBullishOB >= 0 && g_nearestBullishOB < ArraySize(g_orderBlocks) && g_distanceToDemand <= MathMax(1.5 * curAtr, 35.0 * pip)))
+@@ -8904 +9054 @@
+-   else if(isPDHSweepActive || (g_nearestBearishOB >= 0 && g_distanceToSupply <= MathMax(1.5 * curAtr, 35.0 * pip)))
++   else if(isPDHSweepActive || (g_nearestBearishOB >= 0 && g_nearestBearishOB < ArraySize(g_orderBlocks) && g_distanceToSupply <= MathMax(1.5 * curAtr, 35.0 * pip)))
+@@ -9161 +9311 @@
+-   if(g_nearestBullishOB >= 0)
++   if(g_nearestBullishOB >= 0 && g_nearestBullishOB < ArraySize(g_orderBlocks))
+@@ -9168 +9318 @@
+-   if(g_nearestBearishOB >= 0)
++   if(g_nearestBearishOB >= 0 && g_nearestBearishOB < ArraySize(g_orderBlocks))
+@@ -10340 +10490 @@
+-      if(g_staticSL <= 0.0 || (activeTradeDir == "BUY" && g_staticSL >= g_staticEntryPrice) || (activeTradeDir == "SELL" && g_staticSL <= g_staticEntryPrice))
++      if(g_staticSL <= 0.0)
+@@ -10351 +10501 @@
+-      if(g_staticSL <= 0.0 || MathAbs(g_staticEntryPrice - g_staticSL) < minSafeDistActive)
++      if(g_staticSL <= 0.0)
+@@ -11813 +11963 @@
+-                                 (g_nearestBullishOB >= 0 && curPrice >= g_orderBlocks[g_nearestBullishOB].low - 6.0 * pipSize && curPrice <= g_orderBlocks[g_nearestBullishOB].high + 10.0 * pipSize) ||
++                                 (g_nearestBullishOB >= 0 && g_nearestBullishOB < ArraySize(g_orderBlocks) && curPrice >= g_orderBlocks[g_nearestBullishOB].low - 6.0 * pipSize && curPrice <= g_orderBlocks[g_nearestBullishOB].high + 10.0 * pipSize) ||
+@@ -11831 +11981 @@
+-                                 (g_nearestBearishOB >= 0 && curPrice <= g_orderBlocks[g_nearestBearishOB].high + 6.0 * pipSize && curPrice >= g_orderBlocks[g_nearestBearishOB].low - 10.0 * pipSize) ||
++                                 (g_nearestBearishOB >= 0 && g_nearestBearishOB < ArraySize(g_orderBlocks) && curPrice <= g_orderBlocks[g_nearestBearishOB].high + 6.0 * pipSize && curPrice >= g_orderBlocks[g_nearestBearishOB].low - 10.0 * pipSize) ||
+@@ -15080,0 +15231 @@
++   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 4.0);
+@@ -16514 +16665 @@
+-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.50", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
++   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.72", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+@@ -17238,0 +17390 @@
 +   if(!SEGSEnsureRuntimeReady()) return;
- 
-    if(id == CHARTEVENT_CHART_CHANGE)
-    {
-@@ -17579,7 +17483,7 @@
-          if(g_myAdvisorEnabled)
-          {
-             g_signalGeneratedWhileAdvisorEnabled = true;
--            RunAdvisorStrategyEngine(true);
-+            RunAdvisorStrategyEngine(true, true);
-          }
-          SaveAdvisorPersistentState();
-          DrawUnifiedTerminalDashboard();
-@@ -18000,7 +17904,7 @@
-          if(g_myAdvisorEnabled)
-          {
-             g_signalGeneratedWhileAdvisorEnabled = true;
--            RunAdvisorStrategyEngine(true);
-+            RunAdvisorStrategyEngine(true, true);
-          }
-          SaveAdvisorPersistentState();
-          DrawUnifiedTerminalDashboard();
