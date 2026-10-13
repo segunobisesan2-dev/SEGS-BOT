@@ -2,7 +2,7 @@
 from pathlib import Path
 import json,re,subprocess,tempfile,hashlib
 root=Path(__file__).resolve().parents[1]
-s=(root/'SEGS_Trade_Manager_Pro_v3.72.mq5').read_text()
+s=(root/'SEGS_Trade_Manager_Pro_v3.73.mq5').read_text()
 assert all(p.read_text()==s for p in root.rglob('*.mq5'))
 ts=(root/'src/data/mql5Code.ts').read_text()
 assert json.loads(ts.split(' = ',1)[1].split(';\nexport default',1)[0])==s
@@ -12,6 +12,8 @@ assert not re.search(r'if\([^\n]*GetSafestStructuralStopLoss',s)
 a=s.index('bool SEGSSelectActiveOrderBlock(')
 b=s.index('//+------------------------------------------------------------------+',s.index('double GetSafestStructuralStopLoss(',a))
 assert s[a:b] in (root/'tests/structural_stop_test.cpp').read_text(), 'Harness must use current EA functions'
+a_reset=s.index('bool SEGSResetExpiredSetup(string sym)\n{');b_reset=s.index('\nvoid CancelUnviablePlannedEntry',a_reset)
+assert s[a_reset:b_reset] in (root/'tests/expired_signal_test.cpp').read_text()
 assert 'SERIES_SYNCHRONIZED' in s and 'BarsCalculated(handles[h])' in s
 clean=re.sub(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'','',s)
 stack=[]
@@ -20,7 +22,7 @@ for c in clean:
  elif c in ')}]':assert stack and stack.pop()=={')':'(',']':'[','}':'{'}[c]
 assert not stack
 with tempfile.TemporaryDirectory() as tmp:
- for name in ['structural_stop_test','stop_guard_regression']:
+ for name in ['structural_stop_test','stop_guard_regression','expired_signal_test']:
   target=str(Path(tmp)/name)
   subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',str(root/'tests'/f'{name}.cpp'),'-o',target],check=True)
   subprocess.run([target],check=True)

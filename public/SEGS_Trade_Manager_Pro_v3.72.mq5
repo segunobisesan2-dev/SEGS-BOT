@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.72.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.73.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.72 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.73 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.72"
+#property version   "3.73"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -821,6 +821,7 @@ void   UpdateTradeAdviceLines();
 void   ScanMarketStructureAndAdvice(bool forceScan=false);
 bool   IsPlannedEntryViable(string sym, string action, double entryPrice, double slPrice, double curPrice, double pipSize, double curAtr, string &outUnviableReason);
 void   CancelUnviablePlannedEntry(string sym, string reason);
+bool SEGSResetExpiredSetup(string sym);
 bool   TryReactivatePlannedEntry(string sym, string candDir, double curPrice, double pipSize, double curAtr);
 void   ExecuteAdvisedTrade(bool isAutoTrade=false);
 bool   RollbackAdvisorSetup(string shortSig, string signalID, const ulong &tickets[], int maxLegs);
@@ -991,7 +992,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.72 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.73 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1078,7 +1079,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.72 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.73 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -1297,6 +1298,7 @@ void RunAdvisorStrategyEngine(bool forceScan, bool allowAutoTrade)
    UpdateH1OrderBlocks(forceScan);
    GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 3.0);
    ScanMarketStructureAndAdvice(forceScan);
+   if(SEGSResetExpiredSetup(_Symbol)) ScanMarketStructureAndAdvice(true);
    SEGSCalibrateActiveZoneProtection();
    UpdateOBLocationSnapshot(_Symbol);
    UpdateH1OBLocationSnapshot(_Symbol);
@@ -6776,7 +6778,7 @@ void SaveActiveSignalSnapshot(string sym)
    long login = AccountInfoInteger(ACCOUNT_LOGIN);
    string prefix = "SEGS_SIG_" + IntegerToString(login) + "_" + sym + "_";
 
-   if(g_hasViableEntry && g_staticEntryPrice > 0.0)
+   if(g_hasViableEntry && !g_isSignalExpired && g_staticEntryPrice > 0.0)
    {
       GlobalVariableSet(prefix + "VALID", 1.0);
       GlobalVariableSet(prefix + "ACTION", (g_currentAdvisedAction == "BUY") ? 1.0 : ((g_currentAdvisedAction == "SELL") ? -1.0 : 0.0));
@@ -9735,6 +9737,36 @@ bool IsPlannedEntryViable(string sym, string action, double entryPrice, double s
 //+------------------------------------------------------------------+
 //| Cancel an unviable planned entry and prepare for fresh scan      |
 //+------------------------------------------------------------------+
+bool SEGSResetExpiredSetup(string sym)
+{
+   if(CountOpenAdvisorTradesForSymbol(sym) > 0) return false;
+   if(!g_isSignalExpired && g_setupState != "EXPIRED" && g_setupState != "INVALIDATED" && g_setupState != "CANCELLED") return false;
+   g_isSignalExpired = false;
+   g_hasViableEntry = false;
+   g_currentTradeTaken = false;
+   g_currentSignalID = "";
+   g_currentAdvisedAction = "NONE";
+   g_plannedAction = "NONE";
+   g_staticEntryPrice = 0.0; g_staticSL = 0.0;
+   g_staticTP1 = 0.0; g_staticTP2 = 0.0; g_staticTP3 = 0.0; g_staticTP4 = 0.0;
+   g_signalTriggerTime = 0; g_lastSignalConfirmationTime = 0;
+   g_signalGeneratedWhileAdvisorEnabled = false;
+   g_lastAdviceScanBarTime = 0;
+   g_lastCancelledEntryPrice = 0.0; g_lastCancelledEntrySL = 0.0;
+   g_lastCancelledEntryAction = "NONE";
+   g_obSignalDirection = "NONE"; g_obSignalLow = 0.0; g_obSignalHigh = 0.0;
+   g_setupState = "SCANNING";
+   g_setupQuality = 0;
+   g_blockReason = "SCANNING FOR NEW OPPORTUNITY";
+   g_primaryRejectionReason = "";
+   g_signalStatusLabel = "SCANNING FOR NEW OPPORTUNITY";
+   ClearActiveSignalSnapshot(sym);
+   DeleteTradeAdviceLines();
+   // Executed-signal history and account execution locks are deliberately retained.
+   PrintFormat("[SEGS SIGNAL RESET] %s expired setup cleared; fresh opportunity scan enabled", sym);
+   return true;
+}
+
 void CancelUnviablePlannedEntry(string sym, string reason)
 {
    PrintFormat("[Trade Advisor] Planned %s entry on %s at %.5f CANCELLED (%s). Scanning for next viable entry...",
@@ -9760,6 +9792,7 @@ void CancelUnviablePlannedEntry(string sym, string reason)
    g_isSignalExpired      = true;
    g_blockReason          = "PLANNED ENTRY CANCELLED: " + reason;
    g_signalStatusLabel    = "PLANNED ENTRY CANCELLED (" + reason + ")";
+   SEGSResetExpiredSetup(sym);
 
    ClearActiveSignalSnapshot(sym);
    DeleteTradeAdviceLines();
@@ -10210,6 +10243,7 @@ bool EvaluateTrendReversalConditions(string sym,
 void ScanMarketStructureAndAdvice(bool forceScan=false)
 {
    string sym = _Symbol;
+   if(SEGSResetExpiredSetup(sym)) forceScan = true;
    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
    double pipSize = GetPipSize(sym);
    double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
@@ -13725,6 +13759,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       g_hasViableEntry = false;
       g_setupState = "INVALIDATED";
       g_blockReason = "SL BREACHED BEFORE ENTRY";
+      SEGSResetExpiredSetup(sym);
       if(!isAutoTrade) Alert(msg);
       return;
    }
@@ -16662,7 +16697,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.72", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.73", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {

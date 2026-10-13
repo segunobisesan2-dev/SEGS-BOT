@@ -1,8 +1,8 @@
-# SEGS-BOT — full EA v3.72
+# SEGS-BOT — full EA v3.73
 
-[Download the full MT5 source](https://raw.githubusercontent.com/segunobisesan2-dev/SEGS-BOT/main/SEGS_Trade_Manager_Pro_v3.72.mq5)
+[Download the full MT5 source](https://raw.githubusercontent.com/segunobisesan2-dev/SEGS-BOT/main/SEGS_Trade_Manager_Pro_v3.73.mq5)
 
-Download all files using **Code → Download ZIP**. Install the v3.72 source, compile with F7 in MetaEditor, then validate on demo. No native MT5 compiler or runtime was available in this environment; successful native compilation and permanent resolution of detachment are not claimed.
+Download all files using **Code → Download ZIP**. Install the v3.73 source, compile with F7 in MetaEditor, then validate on demo. No native MT5 compiler or runtime was available in this environment; successful native compilation and permanent resolution of detachment are not claimed.
 
 ## Stop calibration requested from the chart
 
@@ -34,11 +34,17 @@ The actual reported detachment has not been reproduced, and no Experts/Journal e
 
 18 assertions against the extracted current structural-stop functions compiled using g++ with `-std=c++17 -Wall -Wextra -Werror`, using stubbed MT5 APIs. Includes active demand/supply, invalidated zones, missing nearby active zones, zero metadata, tick rounding, broker distance, original dual modes, and a profitable stop above original BUY entry. This is **not native MQL5 compilation**.
 
-Seven corrected stop-guard statements retain their regression harness. Source default-parameter and lexical-integrity checks pass. All six `.mq5` copies and the decoded TypeScript string are identical. Versioned 3.50/3.71 filenames are compatibility copies of 3.72, not old implementations.
+Seven corrected stop-guard statements retain their regression harness. Source default-parameter and lexical-integrity checks pass. All eight `.mq5` copies and the decoded TypeScript string are identical. Versioned 3.50/3.71 filenames are compatibility copies of 3.73, not old implementations.
 
 ## Required MT5 validation
 
-1. Remove the older EA instance from the chart, replace its source with v3.72, and compile with F7. Verify the file attached is the newly compiled v3.72 executable.
+1. Remove the older EA instance from the chart, replace its source with v3.73, and compile with F7. Verify the file attached is the newly compiled v3.73 executable.
 2. On demo, first disable Algo Trading and attach to GBPUSD, XAUUSD, AUDUSD, USDJPY and a chart still loading history. Wait for readiness and test timeframe changes/restart.
 3. Publish the system stop settings from one chart. Check active zones and both BUY/SELL protection. Enable demo Algo Trading to exercise trailing modifications.
 4. If detachment remains, provide the Experts and Journal entries at the failure time, including any fatal error, `[SEGS DEINIT]`, and `SEGS_PHASE_<ChartID>` value (F3 terminal global variables).
+
+## Expired-signal recovery (v3.73)
+
+Expired, cancelled, and invalidated pending setups reset to SCANNING when no advisor positions remain. Clears stale flag, signal identity, entry/SL/TP, old cancellation coordinates, cached scan time and active snapshot. Recovery forces a fresh scan; a newly expired candidate gets one immediate retry per engine cycle. Existing positions and executed-signal deduplication records are preserved. Automatic execution remains subject to viable setup, market gates, permissions, and configured limits. Native MT5 verification remains required.
+
+Expiry regression assertions verify clearing stale state, immediate scan eligibility, repeat-reset idempotency and preservation of actual open positions using the extracted reset function.

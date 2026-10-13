@@ -1,302 +1,64 @@
---- v3.71-before.mq5
-+++ v3.72.mq5
+--- v3.72.mq5
++++ v3.73.mq5
 @@ -2 +2 @@
--//|                                SEGS_Trade_Manager_Pro_v3.70.mq5 |
-+//|                                SEGS_Trade_Manager_Pro_v3.72.mq5 |
+-//|                                SEGS_Trade_Manager_Pro_v3.72.mq5 |
++//|                                SEGS_Trade_Manager_Pro_v3.73.mq5 |
 @@ -16 +16 @@
--#property copyright "SEGS Trade Manager Pro v3.70 (Unified Multi-Strategy Confluence)"
-+#property copyright "SEGS Trade Manager Pro v3.72 (Unified Multi-Strategy Confluence)"
+-#property copyright "SEGS Trade Manager Pro v3.72 (Unified Multi-Strategy Confluence)"
++#property copyright "SEGS Trade Manager Pro v3.73 (Unified Multi-Strategy Confluence)"
 @@ -18 +18 @@
--#property version   "3.71"
-+#property version   "3.72"
-@@ -904 +904,2 @@
--   SL_STYLE_AUTO_DUAL = 2
-+   SL_STYLE_AUTO_DUAL = 2,
-+   SL_STYLE_ACTIVE_ORDER_BLOCK = 3
-@@ -906 +907,34 @@
--input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_AUTO_DUAL;
-+input group "=== System Structural Stop Loss ==="
-+input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_ACTIVE_ORDER_BLOCK;
-+input bool InpPublishStopSettingsToAllCharts = false; // Set true on one chart to publish these inputs
-+input double InpActiveOBBufferATR = 0.05; // Small buffer beyond active OB floor/ceiling
-+input int InpActiveOBBufferTicks = 3;
-+input double InpActiveOBMaxDistanceATR = 3.0;
-+input bool InpTrailActiveOrderBlock = true; // Tighten existing advisor positions only
-+ENUM_SEGS_SL_STYLE g_systemStopStyle = SL_STYLE_ACTIVE_ORDER_BLOCK;
-+double g_systemOBBufferATR = 0.05, g_systemOBMaxDistanceATR = 3.0;
-+int g_systemOBBufferTicks = 3;
-+bool g_systemTrailOB = true;
-+
-+string SEGSStopKey(string field)
+-#property version   "3.72"
++#property version   "3.73"
+@@ -823,0 +824 @@
++bool SEGSResetExpiredSetup(string sym);
+@@ -994 +995 @@
+-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.72 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
++   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.73 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+@@ -1081 +1082 @@
+-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.72 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
++   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.73 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+@@ -1299,0 +1301 @@
++   if(SEGSResetExpiredSetup(_Symbol)) ScanMarketStructureAndAdvice(true);
+@@ -6779 +6781 @@
+-   if(g_hasViableEntry && g_staticEntryPrice > 0.0)
++   if(g_hasViableEntry && !g_isSignalExpired && g_staticEntryPrice > 0.0)
+@@ -9737,0 +9740,30 @@
++bool SEGSResetExpiredSetup(string sym)
 +{
-+   return "SEGS_SL_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + field;
++   if(CountOpenAdvisorTradesForSymbol(sym) > 0) return false;
++   if(!g_isSignalExpired && g_setupState != "EXPIRED" && g_setupState != "INVALIDATED" && g_setupState != "CANCELLED") return false;
++   g_isSignalExpired = false;
++   g_hasViableEntry = false;
++   g_currentTradeTaken = false;
++   g_currentSignalID = "";
++   g_currentAdvisedAction = "NONE";
++   g_plannedAction = "NONE";
++   g_staticEntryPrice = 0.0; g_staticSL = 0.0;
++   g_staticTP1 = 0.0; g_staticTP2 = 0.0; g_staticTP3 = 0.0; g_staticTP4 = 0.0;
++   g_signalTriggerTime = 0; g_lastSignalConfirmationTime = 0;
++   g_signalGeneratedWhileAdvisorEnabled = false;
++   g_lastAdviceScanBarTime = 0;
++   g_lastCancelledEntryPrice = 0.0; g_lastCancelledEntrySL = 0.0;
++   g_lastCancelledEntryAction = "NONE";
++   g_obSignalDirection = "NONE"; g_obSignalLow = 0.0; g_obSignalHigh = 0.0;
++   g_setupState = "SCANNING";
++   g_setupQuality = 0;
++   g_blockReason = "SCANNING FOR NEW OPPORTUNITY";
++   g_primaryRejectionReason = "";
++   g_signalStatusLabel = "SCANNING FOR NEW OPPORTUNITY";
++   ClearActiveSignalSnapshot(sym);
++   DeleteTradeAdviceLines();
++   // Executed-signal history and account execution locks are deliberately retained.
++   PrintFormat("[SEGS SIGNAL RESET] %s expired setup cleared; fresh opportunity scan enabled", sym);
++   return true;
 +}
 +
-+void SEGSSyncStopSettings(bool publish=false)
-+{
-+   if(publish || !GlobalVariableCheck(SEGSStopKey("STYLE")))
-+   {
-+      GlobalVariableSet(SEGSStopKey("STYLE"), (double)InpStructuralStopStyle);
-+      GlobalVariableSet(SEGSStopKey("BUFFER_ATR"), MathMax(0.0, MathMin(1.0, InpActiveOBBufferATR)));
-+      GlobalVariableSet(SEGSStopKey("BUFFER_TICKS"), (double)MathMax(1, MathMin(100, InpActiveOBBufferTicks)));
-+      GlobalVariableSet(SEGSStopKey("MAX_DISTANCE_ATR"), MathMax(0.1, MathMin(20.0, InpActiveOBMaxDistanceATR)));
-+      GlobalVariableSet(SEGSStopKey("TRAIL"), InpTrailActiveOrderBlock ? 1.0 : 0.0);
-+   }
-+   g_systemStopStyle = (ENUM_SEGS_SL_STYLE)(int)MathMax(0, MathMin(3, GlobalVariableGet(SEGSStopKey("STYLE"))));
-+   g_systemOBBufferATR = MathMax(0.0, MathMin(1.0, GlobalVariableGet(SEGSStopKey("BUFFER_ATR"))));
-+   g_systemOBBufferTicks = (int)MathMax(1, MathMin(100, GlobalVariableGet(SEGSStopKey("BUFFER_TICKS"))));
-+   g_systemOBMaxDistanceATR = MathMax(0.1, MathMin(20.0, GlobalVariableGet(SEGSStopKey("MAX_DISTANCE_ATR"))));
-+   g_systemTrailOB = GlobalVariableGet(SEGSStopKey("TRAIL")) > 0.5;
-+}
-+
-@@ -924,0 +959,5 @@
-+   static ulong nextRetryMs = 0;
-+   ulong now = GetTickCount64();
-+   if(!g_runtimeReady && now < nextRetryMs) return false;
-+   nextRetryMs = now + 1000;
-+   SEGSSyncStopSettings();
-@@ -925,0 +965,13 @@
-+   ENUM_TIMEFRAMES frames[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4, PERIOD_D1, PERIOD_W1};
-+   int minimums[] = {45, 25, 25, 60, 60, 60, 30, 6, 2};
-+   for(int i = 0; i < ArraySize(frames); i++)
-+   {
-+      if(!SeriesInfoInteger(_Symbol, frames[i], SERIES_SYNCHRONIZED) || iBars(_Symbol, frames[i]) < minimums[i])
-+      {
-+         Comment("SEGS: waiting for synchronized chart history; EA remains attached.");
-+         return false;
-+      }
-+   }
-+   int handles[] = {g_hAtr_H1, g_hEma20_H1, g_hEma50_H1, g_hEma20_H2, g_hEma50_H2, g_hEma20_H4, g_hEma50_H4};
-+   for(int h = 0; h < ArraySize(handles); h++)
-+      if(handles[h] == INVALID_HANDLE || BarsCalculated(handles[h]) < 3) return false;
-@@ -930,0 +983 @@
-+      Comment("");
-@@ -940 +993,2 @@
--   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.50 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
-+   SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.72 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
-@@ -1027 +1081 @@
--   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.50 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
-+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.72 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
-@@ -1176,0 +1231,55 @@
-+void SEGSCalibrateActiveZoneProtection()
-+{
-+   if(g_systemStopStyle != SL_STYLE_ACTIVE_ORDER_BLOCK || !SEGSMarketReady(_Symbol)) return;
-+   double atr = 0.0, values[];
-+   if(g_hAtr_H1 == INVALID_HANDLE || CopyBuffer(g_hAtr_H1, 0, 1, 1, values) != 1) return;
-+   atr = values[0];
-+   if(!MathIsValidNumber(atr) || atr <= 0.0) return;
-+   double tick = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-+   if(g_systemTrailOB && TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) && MQLInfoInteger(MQL_TRADE_ALLOWED))
-+   {
-+      for(int i = PositionsTotal() - 1; i >= 0; i--)
-+      {
-+         ulong ticket = PositionGetTicket(i);
-+         if(ticket == 0 || !posInfo.SelectByTicket(ticket) || posInfo.Symbol() != _Symbol) continue;
-+         if(posInfo.Magic() != InpAdvisorMagicNumber && StringFind(posInfo.Comment(), "SEGS|ADV") < 0) continue;
-+         bool buy = posInfo.PositionType() == POSITION_TYPE_BUY;
-+         double market = SymbolInfoDouble(_Symbol, buy ? SYMBOL_BID : SYMBOL_ASK);
-+         double stop = GetSafestStructuralStopLoss(_Symbol, buy ? "BUY" : "SELL", market, 0.0, 0.0, atr);
-+         double oldSL = posInfo.StopLoss();
-+         if(stop <= 0.0 || (oldSL > 0.0 && (buy ? stop <= oldSL + tick : stop >= oldSL - tick))) continue;
-+         if(ValidateProtectionTarget(_Symbol, posInfo.PositionType(), market, stop, true) != 1) continue;
-+         if(trade.PositionModify(ticket, stop, posInfo.TakeProfit()) && trade.ResultRetcode() == TRADE_RETCODE_DONE)
-+            PrintFormat("[SEGS STRUCTURAL TRAIL] %s ticket=%I64u oldSL=%.8f newSL=%.8f", _Symbol, ticket, oldSL, stop);
-+      }
-+   }
-+   string activeDir; double entry=0.0, stop=0.0, t1=0.0,t2=0.0,t3=0.0,t4=0.0; int count=0;
-+   if(GetOpenAdvisorTradeDetails(_Symbol, activeDir, entry, stop, t1,t2,t3,t4,count))
-+   {
-+      g_staticSL = stop; // Actual broker stop, including profitable trailing stops above/below entry.
-+      UpdateTradeAdviceLines();
-+      return;
-+   }
-+   string dir = g_currentAdvisedAction;
-+   if(dir != "BUY" && dir != "SELL") dir = g_plannedAction;
-+   if(dir != "BUY" && dir != "SELL") return;
-+   double quote = SymbolInfoDouble(_Symbol, dir == "BUY" ? SYMBOL_ASK : SYMBOL_BID);
-+   double calibrated = GetSafestStructuralStopLoss(_Symbol, dir, quote, 0.0, 0.0, atr);
-+   if(calibrated <= 0.0) { g_hasViableEntry=false; g_blockReason="WAITING FOR ACTIVE ORDER BLOCK"; return; }
-+   if(g_staticEntryPrice <= 0.0 || (dir == "BUY" ? calibrated >= g_staticEntryPrice : calibrated <= g_staticEntryPrice))
-+   {
-+      // The old plan is incompatible with current active structure. Show a current preview,
-+      // requiring the normal scanner to validate a fresh signal before any order is sent.
-+      g_staticEntryPrice = quote;
-+      g_hasViableEntry = false; g_currentTradeTaken = false;
-+      g_setupState = "WATCHING";
-+      g_blockReason = "ACTIVE ZONE UPDATED: AWAITING FRESH ENTRY CONFIRMATION";
-+      g_currentSignalID = "";
-+      ClearActiveSignalSnapshot(_Symbol);
-+   }
-+   g_staticSL = calibrated;
-+   BuildStructuralTargets(_Symbol, dir, g_staticEntryPrice, calibrated, atr,
-+      g_staticTP1,g_staticTP2,g_staticTP3,g_staticTP4,g_rrTP2,g_rrWeighted);
-+   UpdateTradeAdviceLines();
-+}
-+
-@@ -1179,0 +1289,4 @@
-+   static ulong nextScanMs = 0;
-+   ulong scanNowMs = GetTickCount64();
-+   if(!forceScan && scanNowMs < nextScanMs) return;
-+   nextScanMs = scanNowMs + 1000;
-@@ -1180,0 +1294 @@
-+   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 2.0);
-@@ -1183,0 +1298 @@
-+   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 3.0);
-@@ -1184,0 +1300 @@
-+   SEGSCalibrateActiveZoneProtection();
-@@ -1193,0 +1310 @@
-+   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 1.0);
-@@ -1254,0 +1372 @@
-+   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 1.0);
-@@ -1258,0 +1377 @@
-+   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 4.0);
-@@ -1270,0 +1390 @@
-+   if(!g_runtimeReady) return; // Startup reconstruction recovers trades once history is ready.
-@@ -2544 +2664 @@
--      double targetTP = (curTP > 0.0) ? curTP : (isBuy ? (entry + (tpPips[leg - 1] * pipSize)) : (entry - (tpPips[leg - 1] * pipSize)));
-+      double targetTP = (curTP > 0.0) ? curTP : (isBuy ? (entry + (tpPips[MathMax(1, MathMin(4, leg)) - 1] * pipSize)) : (entry - (tpPips[MathMax(1, MathMin(4, leg)) - 1] * pipSize)));
-@@ -6144 +6264 @@
--      if((outSL <= 0.0 || MathAbs(outSL - outEntry) < 2.0 * pt) && rSL > 0.0) outSL = rSL;
-+      if(outSL <= 0.0 && rSL > 0.0) outSL = rSL;
-@@ -6152 +6272 @@
--   if(outSL <= 0.0 || MathAbs(outSL - outEntry) < minSafeDist)
-+   if(outSL <= 0.0)
-@@ -6863 +6982,0 @@
--   bool isGBPUSD = IsSymbolMatch(cleanSym, InpGU_Patterns) || (StringFind(cleanSym, "GBPUSD") >= 0);
-@@ -6918,7 +7036,0 @@
--
--      // 6. Specific Achievable Target Calibration for GBPUSD (User Screenshot: TP2 = 1.33200, TP3 = 1.33690)
--      if(isGBPUSD && entryPrice >= 1.32000 && entryPrice <= 1.32800)
--      {
--         if(candCount < 40) candLevels[candCount++] = 1.33200; // 1-2 Day Intermediate Swing Resistance
--         if(candCount < 42) candLevels[candCount++] = 1.33690; // 2-3 Day Major Supply Ceiling
--      }
-@@ -7148 +7260,2 @@
--   ArrayResize(outLots, legsToOpen);
-+   if(legsToOpen < 1 || legsToOpen > 4) { outErrorReason = "INVALID LEG COUNT"; return false; }
-+   if(ArrayResize(outLots, legsToOpen) != legsToOpen) { outErrorReason = "LOT ALLOCATION FAILED"; return false; }
-@@ -7462,0 +7576,24 @@
-+bool SEGSSelectActiveOrderBlock(string sym, bool buy, double price, double atr, double &low, double &high)
-+{
-+   low = 0.0; high = 0.0;
-+   if(sym != _Symbol || !SEGSMarketReady(sym)) return false;
-+   double maxDistance = MathMax(g_systemOBMaxDistanceATR * atr, 10.0 * SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE));
-+   double bestDistance = DBL_MAX;
-+   for(int tf = 0; tf < 2; tf++)
-+   {
-+      int count = tf == 0 ? ArraySize(g_orderBlocks) : ArraySize(g_h1OrderBlocks);
-+      for(int i = 0; i < count; i++)
-+      {
-+         M30OrderBlock zone;
-+         if(tf == 0) zone = g_orderBlocks[i]; else zone = g_h1OrderBlocks[i];
-+         if(zone.invalidated || zone.bullish != buy || zone.low <= 0.0 || zone.high <= zone.low) continue;
-+         double boundary = buy ? zone.low : zone.high;
-+         if(buy ? boundary >= price : boundary <= price) continue;
-+         double distance = MathAbs(price - boundary);
-+         if(distance <= maxDistance && distance < bestDistance)
-+         { low = zone.low; high = zone.high; bestDistance = distance; }
-+      }
-+   }
-+   return low > 0.0;
-+}
-+
-@@ -7508 +7645 @@
--   ENUM_SEGS_SL_STYLE style = InpStructuralStopStyle;
-+   ENUM_SEGS_SL_STYLE style = g_systemStopStyle;
-@@ -7511 +7648,8 @@
--   if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
-+   if(style == SL_STYLE_ACTIVE_ORDER_BLOCK)
-+   {
-+      double activeLow = 0.0, activeHigh = 0.0;
-+      if(!SEGSSelectActiveOrderBlock(sym, buy, entryPrice, atr, activeLow, activeHigh)) return 0.0;
-+      anchor = buy ? activeLow : activeHigh;
-+      buffer = MathMax(g_systemOBBufferATR * atr, g_systemOBBufferTicks * tick);
-+   }
-+   else if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
-@@ -7533,0 +7678 @@
-+   if(shift < 0 || period < 1 || shift >= ArraySize(r) - 1) return 0.0;
-@@ -7969 +8114 @@
--   double atr15 = OBATRAt(m15, 1, InpOBATRPeriod);
-+   double atr15 = OBATRAt(m15, 1, MathMax(1, MathMin(500, InpOBATRPeriod)));
-@@ -7974 +8119 @@
--   double atr5 = (copied5 >= 16) ? OBATRAt(m5, 1, InpOBATRPeriod) : atr15 * 0.55;
-+   double atr5 = (copied5 >= 16) ? OBATRAt(m5, 1, MathMax(1, MathMin(500, InpOBATRPeriod))) : atr15 * 0.55;
-@@ -8055,3 +8200,3 @@
--   g_lastOBScanBarTime = currentBar;
--
--   int need = MathMax(InpOBLookbackBars, InpOBATRPeriod + InpOBSwingLookback + 30);
-+
-+
-+   int need = MathMax(MathMax(20, MathMin(2000, InpOBLookbackBars)), MathMax(1, MathMin(500, InpOBATRPeriod)) + MathMax(1, MathMin(500, InpOBSwingLookback)) + 30);
-@@ -8061,2 +8206,5 @@
--   if(copied < InpOBATRPeriod + InpOBSwingLookback + 10) return;
--
-+   if(copied < MathMax(1, MathMin(500, InpOBATRPeriod)) + MathMax(1, MathMin(500, InpOBSwingLookback)) + 10) return;
-+   if(ArraySize(r) < copied || copied < 6) return;
-+
-+   g_lastOBScanBarTime = currentBar;
-+   g_nearestBullishOB = -1; g_nearestBearishOB = -1;
-@@ -8064 +8212 @@
--   int maxShift = MathMin(copied - InpOBATRPeriod - InpOBSwingLookback - 2, InpOBLookbackBars - 1);
-+   int maxShift = MathMin(copied - MathMax(1, MathMin(500, InpOBATRPeriod)) - MathMax(1, MathMin(500, InpOBSwingLookback)) - 2, MathMax(20, MathMin(2000, InpOBLookbackBars)) - 1);
-@@ -8068 +8216 @@
--      double atr = OBATRAt(r, i, InpOBATRPeriod);
-+      double atr = OBATRAt(r, i, MathMax(1, MathMin(500, InpOBATRPeriod)));
-@@ -8084 +8232 @@
--      for(int p = i + 1; p <= i + InpOBSwingLookback && p < copied; p++)
-+      for(int p = i + 1; p <= i + MathMax(1, MathMin(500, InpOBSwingLookback)) && p < copied; p++)
-@@ -8492,3 +8640,3 @@
--   g_lastH1OBScanBarTime = currentBar;
--
--   int need = MathMax(InpOBLookbackBars, InpOBATRPeriod + InpOBSwingLookback + 30);
-+
-+
-+   int need = MathMax(MathMax(20, MathMin(2000, InpOBLookbackBars)), MathMax(1, MathMin(500, InpOBATRPeriod)) + MathMax(1, MathMin(500, InpOBSwingLookback)) + 30);
-@@ -8498,2 +8646,4 @@
--   if(copied < InpOBATRPeriod + InpOBSwingLookback + 10) return;
--
-+   if(copied < MathMax(1, MathMin(500, InpOBATRPeriod)) + MathMax(1, MathMin(500, InpOBSwingLookback)) + 10) return;
-+   if(ArraySize(r) < copied || copied < 6) return;
-+
-+   g_lastH1OBScanBarTime = currentBar;
-@@ -8501 +8651 @@
--   int maxShift = MathMin(copied - InpOBATRPeriod - InpOBSwingLookback - 2, InpOBLookbackBars - 1);
-+   int maxShift = MathMin(copied - MathMax(1, MathMin(500, InpOBATRPeriod)) - MathMax(1, MathMin(500, InpOBSwingLookback)) - 2, MathMax(20, MathMin(2000, InpOBLookbackBars)) - 1);
-@@ -8505 +8655 @@
--      double atr = OBATRAt(r, i, InpOBATRPeriod);
-+      double atr = OBATRAt(r, i, MathMax(1, MathMin(500, InpOBATRPeriod)));
-@@ -8519 +8669 @@
--      for(int p = i + 1; p <= i + InpOBSwingLookback && p < copied; p++)
-+      for(int p = i + 1; p <= i + MathMax(1, MathMin(500, InpOBSwingLookback)) && p < copied; p++)
-@@ -8898 +9048 @@
--   else if(isPDLSweepActive || (g_nearestBullishOB >= 0 && g_distanceToDemand <= MathMax(1.5 * curAtr, 35.0 * pip)))
-+   else if(isPDLSweepActive || (g_nearestBullishOB >= 0 && g_nearestBullishOB < ArraySize(g_orderBlocks) && g_distanceToDemand <= MathMax(1.5 * curAtr, 35.0 * pip)))
-@@ -8904 +9054 @@
--   else if(isPDHSweepActive || (g_nearestBearishOB >= 0 && g_distanceToSupply <= MathMax(1.5 * curAtr, 35.0 * pip)))
-+   else if(isPDHSweepActive || (g_nearestBearishOB >= 0 && g_nearestBearishOB < ArraySize(g_orderBlocks) && g_distanceToSupply <= MathMax(1.5 * curAtr, 35.0 * pip)))
-@@ -9161 +9311 @@
--   if(g_nearestBullishOB >= 0)
-+   if(g_nearestBullishOB >= 0 && g_nearestBullishOB < ArraySize(g_orderBlocks))
-@@ -9168 +9318 @@
--   if(g_nearestBearishOB >= 0)
-+   if(g_nearestBearishOB >= 0 && g_nearestBearishOB < ArraySize(g_orderBlocks))
-@@ -10340 +10490 @@
--      if(g_staticSL <= 0.0 || (activeTradeDir == "BUY" && g_staticSL >= g_staticEntryPrice) || (activeTradeDir == "SELL" && g_staticSL <= g_staticEntryPrice))
-+      if(g_staticSL <= 0.0)
-@@ -10351 +10501 @@
--      if(g_staticSL <= 0.0 || MathAbs(g_staticEntryPrice - g_staticSL) < minSafeDistActive)
-+      if(g_staticSL <= 0.0)
-@@ -11813 +11963 @@
--                                 (g_nearestBullishOB >= 0 && curPrice >= g_orderBlocks[g_nearestBullishOB].low - 6.0 * pipSize && curPrice <= g_orderBlocks[g_nearestBullishOB].high + 10.0 * pipSize) ||
-+                                 (g_nearestBullishOB >= 0 && g_nearestBullishOB < ArraySize(g_orderBlocks) && curPrice >= g_orderBlocks[g_nearestBullishOB].low - 6.0 * pipSize && curPrice <= g_orderBlocks[g_nearestBullishOB].high + 10.0 * pipSize) ||
-@@ -11831 +11981 @@
--                                 (g_nearestBearishOB >= 0 && curPrice <= g_orderBlocks[g_nearestBearishOB].high + 6.0 * pipSize && curPrice >= g_orderBlocks[g_nearestBearishOB].low - 10.0 * pipSize) ||
-+                                 (g_nearestBearishOB >= 0 && g_nearestBearishOB < ArraySize(g_orderBlocks) && curPrice <= g_orderBlocks[g_nearestBearishOB].high + 6.0 * pipSize && curPrice >= g_orderBlocks[g_nearestBearishOB].low - 10.0 * pipSize) ||
-@@ -15080,0 +15231 @@
-+   GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 4.0);
-@@ -16514 +16665 @@
--   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.50", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.72", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-@@ -17238,0 +17390 @@
-+   if(!SEGSEnsureRuntimeReady()) return;
+@@ -9762,0 +9795 @@
++   SEGSResetExpiredSetup(sym);
+@@ -10212,0 +10246 @@
++   if(SEGSResetExpiredSetup(sym)) forceScan = true;
+@@ -13727,0 +13762 @@
++      SEGSResetExpiredSetup(sym);
+@@ -16665 +16700 @@
+-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.72", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
++   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.73", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
