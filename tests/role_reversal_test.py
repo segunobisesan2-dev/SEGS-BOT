@@ -2,7 +2,7 @@
 from pathlib import Path
 import subprocess,tempfile
 root=Path(__file__).resolve().parents[1]
-s=(root/'SEGS_Trade_Manager_Pro_v3.77.mq5').read_text()
+s=(root/'SEGS_Trade_Manager_Pro_v3.78.mq5').read_text()
 a=s.index('struct M30OrderBlock\n{');b=s.index('M30OrderBlock g_orderBlocks[];',a)
 helpers=s[a:b]
 a=s.index('      for(int j = i - 3; j >= 1; j--)');b=s.index('\n      if(ob.awaitingRoleRetest) ob.invalidated',a)

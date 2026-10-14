@@ -1,0 +1,27 @@
+SEGS Trade Manager Pro v3.78 — stack overflow fix
+
+Evidence: the supplied screenshot shows rapid repeated USDJPY pullback-touch messages followed by "stack overflow" in SEGS_Trade_Manager_Pro_v3.71.mq5. This establishes an EA stack failure, not proof that the entire terminal exited.
+
+Root cause confirmed in source: DrawSentimentHUD calls ScanMarketStructureAndAdvice; the scanner calls DrawSentimentHUD on the level-touch path. Further cycles run through RefreshAccountAdvisorState and ExecuteAdvisedTrade. Repeated nested calls can exhaust the stack before any order executes.
+
+Fixes:
+- HUD drawing uses the latest strategy snapshot and never calls the scanner.
+- All eight auto-execution calls inside the scanner are removed. RunAdvisorStrategyEngine performs automatic execution once, after scanning/calibration, when allowAutoTrade is true.
+- Added scoped guards to engine, scanner, HUD, auto-check and execution callbacks. Guards release ownership on every normal early return. Nested calls cannot enter an already active callback.
+- Touch promotion logging occurs on a transition into TRIGGERED, rather than repeating while that state persists.
+- The v3.77 supply/demand role reversal and restart hardening remain included.
+
+Install:
+1. In MT5, remove older SEGS EA instances from all affected charts. Back up any custom Inputs first. The screenshot shows the old v3.71 filename; do not keep running its old compiled executable alongside v3.78.
+2. File > Open Data Folder > MQL5 > Experts: copy SEGS_Trade_Manager_Pro_v3.78.mq5.
+3. Open it in MetaEditor and press F7. Confirm zero compilation errors, then attach the newly compiled v3.78 executable to a demo chart with Algo Trading disabled.
+4. Reproduce the USDJPY order-block/pullback touch with the HUD visible. Check that Experts does not rapidly repeat the trigger message and reports no stack overflow. Test other affected charts and HUD hide/show.
+5. Enable demo Algo Trading to verify execution still respects permissions/risk and opens only the intended four-leg setup. Save your MT5 profile, restart normally, and check attachment/state restoration.
+
+Validation completed here:
+- Existing source integrity/synchronization and extracted-function C++ regressions pass, including 24 structural-stop assertions.
+- Ten order-block reversal/retest scenarios pass using extracted EA functions and the real closed-bar loop.
+- New source call-graph regression reports no cycles among parsed project functions; rendering cannot reach scanning/execution, and scanning cannot reach automatic execution.
+- Tests compile the actual scope guard and strategy engine with MT5 stubs using g++ -std=c++17 -Wall -Wextra -Werror. Readiness/early-return cleanup, throttling, scan-only permission, bounded expiry rescans, attempted recursive engine calls and all five guard ownership slots pass.
+
+No native MetaEditor/MT5 runtime is available here. These checks cannot certify production readiness or prove that every cause of terminal closure is eliminated. If the entire MT5 application still exits after upgrading, capture Experts and Journal immediately before exit plus the Windows application-crash event. An EA cannot remain running while MT5 is closed; MT5 restores saved chart-profile attachments on reopening.

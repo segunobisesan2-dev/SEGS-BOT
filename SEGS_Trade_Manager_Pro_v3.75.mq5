@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.77.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.78.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.77 (Restart Hardening & Order Block Role Reversal)"
+#property copyright "SEGS Trade Manager Pro v3.78 (Stack Overflow Recursion Fix & Order Block Role Reversal)"
 #property link      "https://ai.studio/build"
-#property version   "3.77"
+#property version   "3.78"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -992,6 +992,41 @@ input double InpStructuralBufferATR = 0.20;
 input double InpDualProximityATR = 0.85;
 bool g_runtimeReady = false;
 
+// Prevent nested scan/render/execution callbacks from consuming the MQL call stack.
+// The normal MT5 event queue remains serialized; this also protects direct calls from helpers.
+enum ENUM_SEGS_CALLBACK_SLOT
+{
+   SEGS_CALLBACK_ENGINE = 0,
+   SEGS_CALLBACK_SCAN = 1,
+   SEGS_CALLBACK_HUD = 2,
+   SEGS_CALLBACK_AUTO = 3,
+   SEGS_CALLBACK_EXECUTE = 4
+};
+bool g_segsCallbackBusy[5] = {false, false, false, false, false};
+class CSEGSCallbackGuard
+{
+private:
+   int m_slot;
+   bool m_owned;
+public:
+   CSEGSCallbackGuard(const int slot)
+   {
+      m_slot = slot;
+      m_owned = false;
+      if(slot >= 0 && slot < 5 && !g_segsCallbackBusy[slot])
+      {
+         g_segsCallbackBusy[slot] = true;
+         m_owned = true;
+      }
+   }
+   ~CSEGSCallbackGuard()
+   {
+      if(m_owned) g_segsCallbackBusy[m_slot] = false;
+   }
+   bool Entered() { return m_owned; }
+};
+
+
 // Readiness is checked again on every event; missing history never detaches the EA.
 bool SEGSMarketReady(string sym)
 {
@@ -1048,7 +1083,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.77 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.78 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1135,7 +1170,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.77 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.78 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -1351,6 +1386,8 @@ void SEGSCalibrateActiveZoneProtection()
 
 void RunAdvisorStrategyEngine(bool forceScan, bool allowAutoTrade)
 {
+   CSEGSCallbackGuard callbackGuard(SEGS_CALLBACK_ENGINE);
+   if(!callbackGuard.Entered()) return;
    if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
    static ulong nextScanMs = 0;
    ulong scanNowMs = GetTickCount64();
@@ -10388,6 +10425,8 @@ bool EvaluateTrendReversalConditions(string sym,
 //+------------------------------------------------------------------+
 void ScanMarketStructureAndAdvice(bool forceScan=false)
 {
+   CSEGSCallbackGuard callbackGuard(SEGS_CALLBACK_SCAN);
+   if(!callbackGuard.Entered()) return;
    string sym = _Symbol;
    if(SEGSResetExpiredSetup(sym)) forceScan = true;
    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
@@ -10929,7 +10968,8 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
       if(InpEnableBounceEntryTrigger && (isTouched || isTouchingOB) && CountOpenAdvisorTradesForSymbol(sym) == 0)
       {
          double triggeredPrice = isTouchingOB ? obLevel : (isTouched ? g_staticEntryPrice : curPrice);
-         PrintFormat("[Trade Advisor] >>> VIABLE ORDER BLOCK / PULLBACK TOUCH TRIGGERED on %s: Price reached %s level %s (%s)! Promoting immediately to TRIGGERED for execution.",
+         if(g_setupState != "TRIGGERED")
+            PrintFormat("[Trade Advisor] >>> VIABLE ORDER BLOCK / PULLBACK TOUCH TRIGGERED on %s: Price reached %s level %s (%s)! Promoting immediately to TRIGGERED for execution.",
                      sym, (isTouchingOB ? "Viable Order Block" : "Planned Entry"), DoubleToString(triggeredPrice, digits), plannedDir);
          g_setupState = "TRIGGERED";
          g_hasViableEntry = true;
@@ -10942,7 +10982,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          g_lastAdviceScanBarTime = curH1BarTime;
          UpdateTradeAdviceLines();
          if(g_showSentimentHUD) DrawSentimentHUD();
-         CheckAndAutoTradeAdvice();
+         // Automatic execution is evaluated once after this scan returns.
          return;
       }
    }
@@ -10994,7 +11034,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             {
                g_currentTradeTaken = false;
                g_setupState = "READY";
-               CheckAndAutoTradeAdvice();
+               // Automatic execution is evaluated once after this scan returns.
             }
          }
       }
@@ -11395,10 +11435,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
                      sym, candEntry, candSL);
          UpdateTradeAdviceLines();
          if(g_showSentimentHUD) DrawSentimentHUD();
-         if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
-         {
-            CheckAndAutoTradeAdvice();
-         }
+         // Automatic execution is evaluated once by the engine after scanning.
       }
       else if(is5thBounceReversal)
       {
@@ -11558,10 +11595,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
                      sym, candEntry, candSL);
          UpdateTradeAdviceLines();
          if(g_showSentimentHUD) DrawSentimentHUD();
-         if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
-         {
-            CheckAndAutoTradeAdvice();
-         }
+         // Automatic execution is evaluated once by the engine after scanning.
       }
       else if(is5thBounceReversalSell)
       {
@@ -11861,10 +11895,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             g_primaryRejectionReason = "NONE (VIABLE ORDER BLOCK ENTERED - EXECUTING)";
             g_blockReason = "NONE (LEVEL TOUCHED)";
             UpdateTradeAdviceLines();
-            if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
-            {
-               CheckAndAutoTradeAdvice();
-            }
+            // Automatic execution is evaluated once by the engine after scanning.
             return;
          }
 
@@ -12583,10 +12614,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             UpdateTradeAdviceLines();
             SaveActiveSignalSnapshot(sym);
 
-            if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
-            {
-               CheckAndAutoTradeAdvice();
-            }
+            // Automatic execution is evaluated once by the engine after scanning.
             return;
          }
          else if(g_obSignalHigh > 0.0 && curPrice > g_obSignalHigh + zoneEntryTol)
@@ -12812,10 +12840,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             UpdateTradeAdviceLines();
             SaveActiveSignalSnapshot(sym);
 
-            if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
-            {
-               CheckAndAutoTradeAdvice();
-            }
+            // Automatic execution is evaluated once by the engine after scanning.
             return;
          }
          else if(g_obSignalLow > 0.0 && curPrice < g_obSignalLow - zoneEntryTol)
@@ -13327,10 +13352,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
    }
 
    // Automatically evaluate auto-trade when setup is confirmed
-   if(g_hasViableEntry && (g_setupState == "TRIGGERED" || g_setupState == "READY") && !g_currentTradeTaken)
-   {
-      CheckAndAutoTradeAdvice();
-   }
+   // Automatic execution is evaluated once by the engine after scanning.
 }
 bool RollbackAdvisorSetup(string shortSig, string signalID, const ulong &tickets[], int maxLegs)
 {
@@ -13824,6 +13846,8 @@ void CheckCircuitBreaker(string sym, bool &outBlocked, string &outReason, int &o
 //+------------------------------------------------------------------+
 void ExecuteAdvisedTrade(bool isAutoTrade=false)
 {
+   CSEGSCallbackGuard callbackGuard(SEGS_CALLBACK_EXECUTE);
+   if(!callbackGuard.Entered()) return;
    if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
    string sym = _Symbol;
 
@@ -14411,6 +14435,8 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
 
 void CheckAndAutoTradeAdvice()
 {
+   CSEGSCallbackGuard callbackGuard(SEGS_CALLBACK_AUTO);
+   if(!callbackGuard.Entered()) return;
    if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
    // 1. Advisor Enabled check
    if(!g_myAdvisorEnabled) return;
@@ -16229,6 +16255,8 @@ void DeleteSentimentHUD()
 
 void DrawSentimentHUD()
 {
+   CSEGSCallbackGuard callbackGuard(SEGS_CALLBACK_HUD);
+   if(!callbackGuard.Entered()) return;
    if(!g_showSentimentHUD) return;
 
    int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
@@ -16266,7 +16294,7 @@ void DrawSentimentHUD()
    string sym = _Symbol;
    int symDigits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
 
-   ScanMarketStructureAndAdvice(false);
+   // Render the latest engine snapshot; never scan or execute from a drawing callback.
    UpdateUnifiedStrategyMatrix(sym);
 
    // Outer Background Panel (Strict Z-Order 30)
@@ -16881,7 +16909,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.77", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.78", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {

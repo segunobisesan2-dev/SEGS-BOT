@@ -1,3 +1,13 @@
+# SEGS-BOT — full EA v3.78
+
+Latest source: `SEGS_Trade_Manager_Pro_v3.78.mq5`. Download package: `public/SEGS_Trade_Manager_Pro_v3.78.zip`. Installation and evidence: `public/SEGS_v3.78_RELEASE_NOTES.txt`.
+
+Fixes the confirmed HUD → scanner → HUD recursion behind the screenshot's stack overflow. Rendering cannot scan or execute. Automatic execution happens once after scanning in the engine; scoped guards prevent nested engine/scanner/HUD/execution calls. Order-block role reversal remains included.
+
+Validation: `python tests/verify_source.py`, `python tests/role_reversal_test.py`, and `python tests/stack_overflow_test.py` pass. Native MetaEditor compilation and demo reproduction remain required. Replace all older compiled EA instances, including the v3.71 filename shown in the screenshot.
+
+Previous release notes follow for historical context.
+
 # SEGS-BOT — full EA v3.77
 
 The latest source is `SEGS_Trade_Manager_Pro_v3.77.mq5`, based on the uploaded v3.76. Read `public/SEGS_v3.77_RELEASE_NOTES.txt` for installation and restart checks.
