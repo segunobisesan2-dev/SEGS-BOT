@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.75.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.77.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.75 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.77 (Restart Hardening & Order Block Role Reversal)"
 #property link      "https://ai.studio/build"
-#property version   "3.75"
+#property version   "3.77"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -416,7 +416,14 @@ input bool                 InpEnableReversalProtection      = true;             
 input int                  InpReversalH1MinBounces          = 3;                // Min H1 candle bounces on zone lowest/highest point (Default: 3)
 input int                  InpReversalM30MinBounces         = 4;                // Min M30 candle bounces on zone lowest/highest point (Default: 4)
 input double               InpReversalZoneRetestRatio       = 0.30;             // Retest sweet-spot depth within zone (0.25 - 0.35)
+input bool                 InpEnableBounceEntryTrigger      = true;             // Promote a qualified live retest to TRIGGERED immediately
+input bool                 InpCountContinuousZoneDefences   = true;             // Count consecutive closed candles that defend the same zone
+input bool                 InpRequireLiveRetestAfterBounces = true;             // Require price back at the zone before executing after bounce qualification
 input bool                 InpEnforceAchievableTP           = true;             // Calibrate TP1-3 for 2-3 trading days attainability
+
+input group "=== [Order Block Role Reversal / Breaker Strategy] ==="
+input bool InpEnableOBRoleReversal = true; // Closed parent-bar break converts supply/demand
+input int  InpOBMaxRoleReversals = 3;      // Per origin, 1..10; next breach retires zone
 
 // Higher Timeframe Liquidity Intelligence Struct
 struct HTFLiquidityData
@@ -448,6 +455,9 @@ HTFLiquidityData g_htfLiquidity;
 struct M30OrderBlock
 {
    bool       bullish;
+   int        roleReversals;
+   datetime   roleChangeTime; // Opening time of last CLOSED parent breakout candle
+   bool       awaitingRoleRetest;
    double     high;
    double     low;
    datetime   originTime;
@@ -465,6 +475,45 @@ struct M30OrderBlock
    int        liquidityBonus;
    bool       isViableSpot;
 };
+
+// Return true when the breach was converted; otherwise caller retires the zone.
+bool SEGSReverseOrderBlock(M30OrderBlock &ob, datetime breakTime)
+{
+   if(!InpEnableOBRoleReversal ||
+      ob.roleReversals >= (int)MathMax(1, MathMin(10, InpOBMaxRoleReversals))) return false;
+   ob.bullish = !ob.bullish;
+   ob.roleReversals++;
+   ob.roleChangeTime = breakTime;
+   ob.confirmTime = breakTime;
+   ob.awaitingRoleRetest = true;
+   ob.invalidated = false;
+   // Evidence for the old side must never qualify the new side.
+   ob.touchCount = 0;
+   ob.zoneDefended = false;
+   ob.lowerTFConfirmed = false;
+   ob.trendAligned = false;
+   ob.liquiditySweep = false;
+   ob.hasFVG = false;
+   ob.liquidityBonus = 0;
+   ob.liquidityContext = "ROLE REVERSAL: WAITING FOR RETEST";
+   ob.qualityScore = 30;
+   ob.isViableSpot = false;
+   ob.status = ob.bullish ? "BREAKER DEMAND: WAIT RETEST" : "BREAKER SUPPLY: WAIT RETEST";
+   return true;
+}
+
+bool SEGSConfirmRoleRetest(M30OrderBlock &ob, const MqlRates &bar)
+{
+   if(!ob.awaitingRoleRetest || bar.time <= ob.roleChangeTime) return false;
+   bool overlap = bar.low <= ob.high && bar.high >= ob.low;
+   bool defended = ob.bullish ? bar.close > ob.high : bar.close < ob.low;
+   if(!overlap || !defended) return false;
+   ob.awaitingRoleRetest = false;
+   ob.zoneDefended = true;
+   ob.lowerTFConfirmed = true;
+   ob.liquidityContext = "ROLE REVERSAL: RETEST CONFIRMED";
+   return true;
+}
 
 M30OrderBlock g_orderBlocks[];
 // 1-Hour (H1) Order Block Intelligence (M30 SL Recovery Engine)
@@ -960,7 +1009,9 @@ bool SEGSEnsureRuntimeReady()
    if(!SEGSMarketReady(_Symbol)) return false;
    static ulong nextRetryMs = 0;
    ulong now = GetTickCount64();
-   if(!g_runtimeReady && now < nextRetryMs) return false;
+   if(now < nextRetryMs) return g_runtimeReady;
+   bool wasReady = g_runtimeReady;
+   g_runtimeReady = false;
    nextRetryMs = now + 1000;
    SEGSSyncStopSettings();
    InitIndicatorHandles(_Symbol);
@@ -980,7 +1031,7 @@ bool SEGSEnsureRuntimeReady()
    int handles[] = {g_hAtr_H1, g_hEma20_H1, g_hEma50_H1, g_hEma20_H2, g_hEma50_H2, g_hEma20_H4, g_hEma50_H4};
    for(int h = 0; h < ArraySize(handles); h++)
       if(handles[h] == INVALID_HANDLE || BarsCalculated(handles[h]) < 3) return false;
-   if(!g_runtimeReady)
+   if(!wasReady)
    {
       InitIndicatorHandles(_Symbol);
       ReconstructPositionGroups();
@@ -988,6 +1039,7 @@ bool SEGSEnsureRuntimeReady()
       Comment("");
       PrintFormat("[SEGS READY] Market metadata available on %s", _Symbol);
    }
+   g_runtimeReady = true;
    return true;
 }
 
@@ -996,7 +1048,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.75 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.77 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1083,7 +1135,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.75 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.77 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -1176,6 +1228,11 @@ void ResetMarketQualityState(string newSym)
       RestoreActiveSignalSnapshot(newSym);
    }
 
+   ArrayResize(g_h1OrderBlocks, 0);
+   g_h1OBCount = 0;
+   g_lastH1OBScanBarTime = 0;
+   g_nearestBullishH1OB = -1;
+   g_nearestBearishH1OB = -1;
    // Reset M30 Order Block state
    ArrayResize(g_orderBlocks, 0);
    g_obCount = 0;
@@ -1203,7 +1260,11 @@ void OnDeinit(const int reason)
    // CRITICAL: Unconditionally persist MyAdvisor, HUD toggles, and active Trade Signal across terminal restart & hibernation
    SaveAdvisorPersistentState();
 
-   // Preserving visual markings and state across timeframe changes (REASON_CHARTCHANGE / REASON_RECOMPILE)
+   GlobalVariablesFlush();
+   // MT5 owns chart attachment/profile restore. Preserve visuals during normal shutdown/reinitialization.
+   if(reason == REASON_CLOSE || reason == REASON_PARAMETERS || reason == REASON_ACCOUNT)
+      return;
+   // Preserve markings through timeframe changes/recompilation.
    if(reason == REASON_CHARTCHANGE || reason == REASON_RECOMPILE)
    {
       // Clean only the dashboard table so it re-anchors cleanly, keeping Open Trade Markings intact!
@@ -1340,6 +1401,13 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnTimer()
 {
+   static ulong lastCheckpointMs = 0;
+   ulong checkpointNow = GetTickCount64();
+   if(checkpointNow - lastCheckpointMs >= 30000)
+   {
+      SaveAdvisorPersistentState();
+      lastCheckpointMs = checkpointNow;
+   }
    if(!SEGSEnsureRuntimeReady()) return;
    // 1. Maintain Chart Heartbeat and ensure chart keyboard messages route to EA
    long myChartId = ChartID();
@@ -7987,7 +8055,7 @@ void DrawM30OrderBlocks()
    for(int i = 0; i < ArraySize(g_orderBlocks); i++)
    {
       M30OrderBlock ob = g_orderBlocks[i];
-      if(ob.invalidated && !g_showBrokenOrderBlocks) continue;
+      if(ob.invalidated && !ob.awaitingRoleRetest && !g_showBrokenOrderBlocks) continue;
 
       string name = PREFIX + "OB_" + (ob.bullish ? "DEM_" : "SUP_") + IntegerToString((int)ob.originTime);
       if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, ob.originTime, ob.high, endTime, ob.low)) continue;
@@ -8056,6 +8124,7 @@ void DrawM30OrderBlocks()
          width = 1;
       }
 
+      if(ob.awaitingRoleRetest) { c = clrGold; style = STYLE_DASH; width = 1; statusText = ob.status; }
       ObjectSetInteger(0, name, OBJPROP_COLOR, c);
       ObjectSetInteger(0, name, OBJPROP_FILL, !ob.invalidated); // Only solid-fill active zones; broken zones are clean outline-only!
       ObjectSetInteger(0, name, OBJPROP_BACK, true);
@@ -8065,7 +8134,12 @@ void DrawM30OrderBlocks()
 
       string desc;
       string shortLabel = "";
-      if(ob.invalidated)
+      if(ob.awaitingRoleRetest)
+      {
+         desc = ob.status + " (not eligible for trading until a later closed-bar retest)";
+         shortLabel = ob.bullish ? "BREAKER DEMAND: WAIT RETEST" : "BREAKER SUPPLY: WAIT RETEST";
+      }
+      else if(ob.invalidated)
       {
          desc = StringFormat("M30 BROKEN %s ZONE [BROKEN] Score:%d/100 %s (INVALIDATED BY M30 CANDLE CLOSE BREACH)",
                              ob.bullish ? "DEMAND" : "SUPPLY",
@@ -8135,6 +8209,7 @@ void RefreshOBLowerTFConfirmations(string sym)
       // 1. Check M15 rejection and confirmation
       for(int t = 1; t <= 12 && !confirmed; t++)
       {
+         if(g_orderBlocks[i].roleReversals > 0 && m15[t].time <= g_orderBlocks[i].roleChangeTime) continue;
          bool touched = (m15[t].low <= g_orderBlocks[i].high && m15[t].high >= g_orderBlocks[i].low);
          if(!touched) continue;
 
@@ -8163,6 +8238,7 @@ void RefreshOBLowerTFConfirmations(string sym)
       {
          for(int t = 1; t <= 16 && !confirmed; t++)
          {
+            if(g_orderBlocks[i].roleReversals > 0 && m5[t].time <= g_orderBlocks[i].roleChangeTime) continue;
             bool touched = (m5[t].low <= g_orderBlocks[i].high && m5[t].high >= g_orderBlocks[i].low);
             if(!touched) continue;
 
@@ -8271,6 +8347,7 @@ void UpdateM30OrderBlocks(bool forceScan=false)
       if(!validBull && !validBear) continue;
 
       M30OrderBlock ob;
+      ZeroMemory(ob);
       ob.bullish          = validBull;
       ob.high             = zoneHigh;
       ob.low              = zoneLow;
@@ -8313,11 +8390,15 @@ void UpdateM30OrderBlocks(bool forceScan=false)
          if((ob.bullish && r[j].close < ob.low - invalidBuffer) ||
             (!ob.bullish && r[j].close > ob.high + invalidBuffer))
          {
+            if(SEGSReverseOrderBlock(ob, r[j].time)) continue; // Break candle is NOT a retest.
+            ob.awaitingRoleRetest = false; // Retirement is final, including failed pending breakers.
             ob.invalidated = true;
             ob.status = "BROKEN";
             ob.qualityScore = -35;
             break;
          }
+
+         if(ob.awaitingRoleRetest && !SEGSConfirmRoleRetest(ob, r[j])) continue;
 
          // 2. Liquidity Sweep & Zone Defense Check:
          // If a candle wick penetrated past the zone floor/ceiling, but closed back inside or above/below the zone,
@@ -8353,10 +8434,10 @@ void UpdateM30OrderBlocks(bool forceScan=false)
          }
       }
 
+      if(ob.awaitingRoleRetest) ob.invalidated = true; // Exclude pending breakers from entry/SL/TP selection.
       if(ob.invalidated)
       {
-         ob.status = "BROKEN";
-         ob.qualityScore = -35;
+         if(!ob.awaitingRoleRetest) { ob.status = "BROKEN"; ob.qualityScore = -35; }
          int n = ArraySize(g_orderBlocks);
          ArrayResize(g_orderBlocks, n + 1);
          g_orderBlocks[n] = ob;
@@ -8366,6 +8447,7 @@ void UpdateM30OrderBlocks(bool forceScan=false)
       // Verification from most recent closed bars: if price entered/tested zone and couldn't close beyond it
       for(int k = 1; k <= 3 && k < copied; k++)
       {
+         if(ob.roleReversals > 0 && r[k].time <= ob.roleChangeTime) continue;
          if(ob.bullish && r[k].low <= ob.high && r[k].close >= ob.low)
          {
             ob.zoneDefended = true;
@@ -8473,6 +8555,7 @@ void UpdateM30OrderBlocks(bool forceScan=false)
 
       ob.qualityScore = (int)MathMax(0, MathMin(100, ob.qualityScore));
 
+      if(ob.roleReversals > 0) ob.status = ob.bullish ? "BREAKER DEMAND: RETEST CONFIRMED" : "BREAKER SUPPLY: RETEST CONFIRMED";
       int n = ArraySize(g_orderBlocks);
       ArrayResize(g_orderBlocks, n + 1);
       g_orderBlocks[n] = ob;
@@ -8531,7 +8614,7 @@ void DrawH1OrderBlocks()
    for(int i = 0; i < ArraySize(g_h1OrderBlocks); i++)
    {
       M30OrderBlock ob = g_h1OrderBlocks[i];
-      if(ob.invalidated && !g_showBrokenOrderBlocks) continue;
+      if(ob.invalidated && !ob.awaitingRoleRetest && !g_showBrokenOrderBlocks) continue;
       string name = PREFIX + "OB_H1_" + (ob.bullish ? "DEM_" : "SUP_") + IntegerToString((int)ob.originTime);
       if(!ObjectCreate(0, name, OBJ_RECTANGLE, 0, ob.originTime, ob.high, endTime, ob.low)) continue;
 
@@ -8588,6 +8671,7 @@ void DrawH1OrderBlocks()
          width = 1;
       }
 
+      if(ob.awaitingRoleRetest) { c = clrGold; style = STYLE_DASH; width = 1; statusText = ob.status; }
       ObjectSetInteger(0, name, OBJPROP_COLOR, c);
       ObjectSetInteger(0, name, OBJPROP_FILL, !ob.invalidated); // Only solid-fill active zones; broken zones are clean outline-only!
       ObjectSetInteger(0, name, OBJPROP_BACK, true);
@@ -8597,7 +8681,12 @@ void DrawH1OrderBlocks()
 
       string desc;
       string shortLabel = "";
-      if(ob.invalidated)
+      if(ob.awaitingRoleRetest)
+      {
+         desc = ob.status + " (not eligible for trading until a later closed-bar retest)";
+         shortLabel = ob.bullish ? "BREAKER DEMAND: WAIT RETEST" : "BREAKER SUPPLY: WAIT RETEST";
+      }
+      else if(ob.invalidated)
       {
          desc = StringFormat("1-HOUR (H1) BROKEN %s ZONE [BROKEN] Score:%d/100 %s (INVALIDATED BY H1 CANDLE CLOSE BREACH)",
                              ob.bullish ? "DEMAND" : "SUPPLY",
@@ -8708,6 +8797,7 @@ void UpdateH1OrderBlocks(bool forceScan=false)
       if(!validBull && !validBear) continue;
 
       M30OrderBlock ob;
+      ZeroMemory(ob);
       ob.bullish          = validBull;
       ob.high             = zoneHigh;
       ob.low              = zoneLow;
@@ -8745,11 +8835,15 @@ void UpdateH1OrderBlocks(bool forceScan=false)
          if((ob.bullish && r[j].close < ob.low - invalidBuffer) ||
             (!ob.bullish && r[j].close > ob.high + invalidBuffer))
          {
+            if(SEGSReverseOrderBlock(ob, r[j].time)) continue; // Break candle is NOT a retest.
+            ob.awaitingRoleRetest = false; // Retirement is final, including failed pending breakers.
             ob.invalidated = true;
             ob.status = "BROKEN";
             ob.qualityScore = -35;
             break;
          }
+
+         if(ob.awaitingRoleRetest && !SEGSConfirmRoleRetest(ob, r[j])) continue;
 
          // 2. Liquidity Sweep & Zone Defense Check on closed H1 candle
          bool wickSweptPastFloor = (ob.bullish && r[j].low < ob.low && r[j].low >= ob.low - sweepTolerance && r[j].close >= ob.low);
@@ -8771,10 +8865,10 @@ void UpdateH1OrderBlocks(bool forceScan=false)
                ob.zoneDefended = true;
          }
       }
+      if(ob.awaitingRoleRetest) ob.invalidated = true; // Exclude pending breakers from entry/SL/TP selection.
       if(ob.invalidated)
       {
-         ob.status = "BROKEN";
-         ob.qualityScore = -35;
+         if(!ob.awaitingRoleRetest) { ob.status = "BROKEN"; ob.qualityScore = -35; }
          int sz = ArraySize(g_h1OrderBlocks);
          ArrayResize(g_h1OrderBlocks, sz + 1);
          g_h1OrderBlocks[sz] = ob;
@@ -8785,6 +8879,11 @@ void UpdateH1OrderBlocks(bool forceScan=false)
       else if(ob.liquiditySweep && ob.zoneDefended) ob.status = ob.bullish ? "DEFENDED H1 DEMAND (SWEEP)" : "DEFENDED H1 SUPPLY (SWEEP)";
       else if(ob.zoneDefended) ob.status = ob.bullish ? "DEFENDED H1 DEMAND" : "DEFENDED H1 SUPPLY";
       else ob.status = "RETESTED H1";
+      if(ob.roleReversals > 0)
+      {
+         ob.status = ob.bullish ? "H1 BREAKER DEMAND: RETEST CONFIRMED" : "H1 BREAKER SUPPLY: RETEST CONFIRMED";
+         ob.qualityScore = 65;
+      }
 
       int sz = ArraySize(g_h1OrderBlocks);
       ArrayResize(g_h1OrderBlocks, sz + 1);
@@ -9865,8 +9964,29 @@ int CountOrderBlockBounceCycles(string sym, ENUM_TIMEFRAMES tf, double obLow, do
    // 1. Retrieve persistent bounce memory across MT5 restart, reboot, or offline laptop
    string cleanS = sym;
    StringToUpper(cleanS);
-   string gvKey = StringFormat("SEGS_BNC_%s_%s_%.4f", (tf == PERIOD_H1 ? "H1" : "M30"), cleanS, obLow);
+   int zoneDigits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   string zoneSide = isBullish ? "BUY" : "SELL";
+   string gvKey = StringFormat("SEGS_BNC_%s_%s_%s_%s_%s",
+                               (tf == PERIOD_H1 ? "H1" : "M30"), cleanS, zoneSide,
+                               DoubleToString(obLow, zoneDigits), DoubleToString(obHigh, zoneDigits));
+   datetime roleEpoch = 0;
+   for(int z = 0; z < ArraySize(g_orderBlocks); z++)
+      if(g_orderBlocks[z].roleReversals > 0 && g_orderBlocks[z].bullish == isBullish &&
+         MathAbs(g_orderBlocks[z].low - obLow) < pipSize * 0.01 && MathAbs(g_orderBlocks[z].high - obHigh) < pipSize * 0.01)
+         roleEpoch = (datetime)MathMax((double)roleEpoch, (double)g_orderBlocks[z].roleChangeTime);
+   for(int z = 0; z < ArraySize(g_h1OrderBlocks); z++)
+      if(g_h1OrderBlocks[z].roleReversals > 0 && g_h1OrderBlocks[z].bullish == isBullish &&
+         MathAbs(g_h1OrderBlocks[z].low - obLow) < pipSize * 0.01 && MathAbs(g_h1OrderBlocks[z].high - obHigh) < pipSize * 0.01)
+         roleEpoch = (datetime)MathMax((double)roleEpoch, (double)g_h1OrderBlocks[z].roleChangeTime);
+   // Store epoch separately: terminal global variable names have a 63-character limit.
+   string epochKey = gvKey + "_E";
    int savedBounces = GlobalVariableCheck(gvKey) ? (int)GlobalVariableGet(gvKey) : 0;
+   if(roleEpoch > 0 && (!GlobalVariableCheck(epochKey) || GlobalVariableGet(epochKey) != (double)roleEpoch))
+   {
+      savedBounces = 0;
+      GlobalVariableSet(gvKey, 0.0);
+      GlobalVariableSet(epochKey, (double)roleEpoch);
+   }
 
    int bounces = 0;
    double bounceTol = MathMax(0.25 * atrVal, 6.0 * pipSize);
@@ -9878,6 +9998,7 @@ int CountOrderBlockBounceCycles(string sym, ENUM_TIMEFRAMES tf, double obLow, do
    bool inZone = false;
    for(int b = scanBars; b >= 1; b--)
    {
+      if(roleEpoch > 0 && iTime(sym, tf, b) <= roleEpoch) continue;
       double bHigh  = iHigh(sym, tf, b);
       double bLow   = iLow(sym, tf, b);
       double bClose = iClose(sym, tf, b);
@@ -9887,7 +10008,10 @@ int CountOrderBlockBounceCycles(string sym, ENUM_TIMEFRAMES tf, double obLow, do
          bool touches = (bLow <= obHigh + bounceTol && bClose >= obLow - floorTol);
          if(touches)
          {
-            if(!inZone)
+            // A new retest cycle always counts. When enabled, every additional
+            // closed candle that continues to defend the zone also counts as a
+            // separate defence, matching the system-level bounce rule.
+            if(!inZone || InpCountContinuousZoneDefences)
             {
                bounces++;
                inZone = true;
@@ -9906,7 +10030,7 @@ int CountOrderBlockBounceCycles(string sym, ENUM_TIMEFRAMES tf, double obLow, do
          bool touches = (bHigh >= obLow - bounceTol && bClose <= obHigh + floorTol);
          if(touches)
          {
-            if(!inZone)
+            if(!inZone || InpCountContinuousZoneDefences)
             {
                bounces++;
                inZone = true;
@@ -10099,13 +10223,23 @@ bool EvaluateTrendReversalConditions(string sym,
       // MANDATORY USER RULE FOR COUNTER-TREND REVERSAL:
       // "Price had bounced on the zone several times and this should have signaled that a reversal trade was viable
       // and a trade should have been executed at the beginning of the 5th bounce on a 30-minute chart"
-      bool isReversalBouncesConfirmed  = (h1Bounces >= 3 || m30Bounces >= 4 || (m30Bounces >= 3 && isPriceAtOB));
+      bool isReversalBouncesConfirmed = (h1Bounces >= InpReversalH1MinBounces ||
+                                         m30Bounces >= InpReversalM30MinBounces);
 
-      if(!isReversalBouncesConfirmed && !isPriceAtOB)
+      if(!isReversalBouncesConfirmed)
       {
-         outReversalReason = StringFormat("COUNTER-TREND BUY AWAITING REVERSAL BOUNCES: Requires 3 H1 or 4 M30 bounces on Demand OB [%s - %s] (Found: %d/3 H1, %d/4 M30)",
+         outReversalReason = StringFormat("COUNTER-TREND BUY AWAITING REVERSAL BOUNCES: Requires %d H1 or %d M30 bounces on Demand OB [%s - %s] (Found: %d H1, %d M30)",
+                                          InpReversalH1MinBounces, InpReversalM30MinBounces,
                                           DoubleToString(obZoneLow, digits), DoubleToString(obZoneHigh, digits),
                                           h1Bounces, m30Bounces);
+         return false;
+      }
+
+      if(InpRequireLiveRetestAfterBounces && !isPriceAtOB)
+      {
+         outReversalReason = StringFormat("COUNTER-TREND BUY QUALIFIED (%d H1 / %d M30 BOUNCES): Awaiting live retest of Demand OB [%s - %s]",
+                                          h1Bounces, m30Bounces,
+                                          DoubleToString(obZoneLow, digits), DoubleToString(obZoneHigh, digits));
          return false;
       }
 
@@ -10211,26 +10345,31 @@ bool EvaluateTrendReversalConditions(string sym,
       if(outStopLoss <= outEntryPrice + minRisk)
          outStopLoss = NormalizeDouble(outEntryPrice + minRisk, digits);
 
-      // SYSTEM-LEVEL RULE FOR USDCHF & ALL INSTRUMENTS:
-      // When H1, H2, and H4 are Bullish, AND market structure has Higher Highs (HH):
-      // A Counter-Trend SELL is STRICTLY PROHIBITED at a system level!
-      // The system MUST be looking for a BUY setup when price pulls back into a viable buy zone (Demand OB / Support)!
-      if(isUptrendConfluence || (h1Bull && h2Bull && h4Bull) || g_hasHH_M30 || g_hasHH_H1 || g_marketStructure == "BULLISH")
-      {
-         outReversalReason = "COUNTER-TREND SELL STRICTLY PROHIBITED: H1, H2, H4 are Bullish with Higher High structure. System is seeking BUY pullback into demand.";
-         return false;
-      }
+      // This branch is counter-trend by definition. Do not reject it a second
+      // time merely because the higher-timeframe trend is bullish; the strict
+      // bounce count, intact supply zone and live-retest checks below are the
+      // intended exception that can qualify the reversal.
 
       // MANDATORY USER RULE FOR COUNTER-TREND REVERSAL:
       // "Price had bounced on the zone several times and this should have signaled that a reversal trade was viable
       // and a trade should have been executed at the beginning of the 5th bounce on a 30-minute chart"
-      bool isReversalBouncesConfirmed = (h1Bounces >= 3 || m30Bounces >= 4);
+      bool isReversalBouncesConfirmed = (h1Bounces >= InpReversalH1MinBounces ||
+                                         m30Bounces >= InpReversalM30MinBounces);
 
       if(!isReversalBouncesConfirmed)
       {
-         outReversalReason = StringFormat("COUNTER-TREND SELL AWAITING REVERSAL BOUNCES: Requires 3 H1 or 4 M30 bounces on Supply OB [%s - %s] (Found: %d/3 H1, %d/4 M30)",
+         outReversalReason = StringFormat("COUNTER-TREND SELL AWAITING REVERSAL BOUNCES: Requires %d H1 or %d M30 bounces on Supply OB [%s - %s] (Found: %d H1, %d M30)",
+                                          InpReversalH1MinBounces, InpReversalM30MinBounces,
                                           DoubleToString(obZoneLow, digits), DoubleToString(obZoneHigh, digits),
                                           h1Bounces, m30Bounces);
+         return false;
+      }
+
+      if(InpRequireLiveRetestAfterBounces && !isPriceAtOB)
+      {
+         outReversalReason = StringFormat("COUNTER-TREND SELL QUALIFIED (%d H1 / %d M30 BOUNCES): Awaiting live retest of Supply OB [%s - %s]",
+                                          h1Bounces, m30Bounces,
+                                          DoubleToString(obZoneLow, digits), DoubleToString(obZoneHigh, digits));
          return false;
       }
 
@@ -10668,11 +10807,13 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
 
       // Check current live tick AND recent candle wicks (M1, M5 & M15) to catch fast wick touches!
       double hM1_0 = iHigh(sym, PERIOD_M1, 0), lM1_0 = iLow(sym, PERIOD_M1, 0);
-      double hM5_0 = iHigh(sym, PERIOD_M5, 0), hM5_1 = iHigh(sym, PERIOD_M5, 1);
-      double lM5_0 = iLow(sym, PERIOD_M5, 0),  lM5_1 = iLow(sym, PERIOD_M5, 1);
+      double hM5_0 = iHigh(sym, PERIOD_M5, 0);
+      double lM5_0 = iLow(sym, PERIOD_M5, 0);
       double hM15_0 = iHigh(sym, PERIOD_M15, 0), lM15_0 = iLow(sym, PERIOD_M15, 0);
-      double maxWick = MathMax(testPrice, MathMax(hM1_0, MathMax(hM5_0, MathMax(hM5_1, hM15_0))));
-      double minWick = MathMin(testPrice, MathMin(lM1_0, MathMin(lM5_0, MathMin(lM5_1, lM15_0))));
+      // Use only live candles here. A closed M5 candle may predate the setup and
+      // must not trigger a delayed order after the market has already moved away.
+      double maxWick = MathMax(testPrice, MathMax(hM1_0, MathMax(hM5_0, hM15_0)));
+      double minWick = MathMin(testPrice, MathMin(lM1_0, MathMin(lM5_0, lM15_0)));
 
       if(plannedDir == "SELL")
       {
@@ -10753,7 +10894,39 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          }
       }
 
-      if((isTouched || isTouchingOB) && CountOpenAdvisorTradesForSymbol(sym) == 0)
+      // A generic level touch must never bypass the configured counter-trend
+      // bounce gate. Trend-aligned setups pass immediately; counter-trend setups
+      // need their configured H1/M30 bounce count and (optionally) a live retest.
+      bool bounceGateAllowsEntry = true;
+      string bounceGateReason = "";
+      if(InpEnableBounceEntryTrigger && InpEnableReversalProtection && (isTouched || isTouchingOB))
+      {
+         double bounceEntry = 0.0, bounceSL = 0.0;
+         int bounceH1 = 0, bounceM30 = 0;
+         bounceGateAllowsEntry = EvaluateTrendReversalConditions(sym, plannedDir, bounceEntry, bounceSL,
+                                                                  bounceH1, bounceM30, bounceGateReason);
+         if(bounceEntry > 0.0 && bounceSL > 0.0)
+         {
+            g_staticEntryPrice = NormalizeDouble(bounceEntry, digits);
+            g_staticSL = NormalizeDouble(bounceSL, digits);
+         }
+      }
+
+      if((isTouched || isTouchingOB) && !bounceGateAllowsEntry)
+      {
+         g_setupState = "WATCHING";
+         g_hasViableEntry = (g_staticEntryPrice > 0.0 && g_staticSL > 0.0);
+         g_currentAdvisedAction = plannedDir;
+         g_plannedAction = plannedDir;
+         g_primaryRejectionReason = bounceGateReason;
+         g_blockReason = bounceGateReason;
+         g_signalStatusLabel = "WATCHING (BOUNCE RULE NOT YET QUALIFIED)";
+         UpdateTradeAdviceLines();
+         if(g_showSentimentHUD) DrawSentimentHUD();
+         return;
+      }
+
+      if(InpEnableBounceEntryTrigger && (isTouched || isTouchingOB) && CountOpenAdvisorTradesForSymbol(sym) == 0)
       {
          double triggeredPrice = isTouchingOB ? obLevel : (isTouched ? g_staticEntryPrice : curPrice);
          PrintFormat("[Trade Advisor] >>> VIABLE ORDER BLOCK / PULLBACK TOUCH TRIGGERED on %s: Price reached %s level %s (%s)! Promoting immediately to TRIGGERED for execution.",
@@ -10971,7 +11144,8 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          }
       }
    }
-   bool hasDemandOBConfluence = (confluentDemandOB >= 0);
+   bool hasDemandOBConfluence = (confluentDemandOB >= 0 &&
+      confluentDemandOB < (demOBIsFromH1 ? ArraySize(g_h1OrderBlocks) : ArraySize(g_orderBlocks)));
 
    // Safe Trend Reversal Check: If market is in a downtrend (confluence of H1/H2/H4),
    // counter-trend BUY is strictly gated by H1 Demand Zone floor defense and 3 H1 / 4 M30 bounces!
@@ -11059,7 +11233,8 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          }
       }
    }
-   bool hasSupplyOBConfluence = (confluentSupplyOB >= 0);
+   bool hasSupplyOBConfluence = (confluentSupplyOB >= 0 &&
+      confluentSupplyOB < (supOBIsFromH1 ? ArraySize(g_h1OrderBlocks) : ArraySize(g_orderBlocks)));
 
    // Safe Trend Reversal Check: If market is in an uptrend (confluence of H1/H2/H4),
    // counter-trend SELL is strictly gated by H1 Supply Zone ceiling defense and 3 H1 / 4 M30 bounces!
@@ -11200,11 +11375,12 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
       g_setupClass           = SETUP_CLASS_A_CONTINUATION;
       g_setupQuality         = hasDemandOBConfluence ? 98 : 95;
       triggerBarTime         = iTime(sym, PERIOD_M15, 1);
-      if(hasDemandOBConfluence && g_orderBlocks[confluentDemandOB].originTime > 0)
-         g_recentPivotTime = g_orderBlocks[confluentDemandOB].originTime;
+      if(hasDemandOBConfluence && (demOBIsFromH1 ? g_h1OrderBlocks[confluentDemandOB].originTime : g_orderBlocks[confluentDemandOB].originTime) > 0)
+         g_recentPivotTime = (demOBIsFromH1 ? g_h1OrderBlocks[confluentDemandOB].originTime : g_orderBlocks[confluentDemandOB].originTime);
 
       double entryTolerance = MathMax(0.35 * curAtr, 12.0 * pipSize);
-      bool is5thBounceReversal = (revBuyM30B >= 4 || revBuyH1B >= 3);
+      bool is5thBounceReversal = (revBuyM30B >= InpReversalM30MinBounces ||
+                                  revBuyH1B >= InpReversalH1MinBounces);
       bool priceAtEntry = (curPriceAsk <= candEntry + entryTolerance && curPriceAsk >= candSL);
 
       if(is5thBounceReversal && priceAtEntry)
@@ -11303,8 +11479,8 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
 
       if(hasSupplyOBConfluence)
       {
-         double obHigh = g_orderBlocks[confluentSupplyOB].high;
-         double obLow  = g_orderBlocks[confluentSupplyOB].low;
+         double obHigh = (supOBIsFromH1 ? g_h1OrderBlocks[confluentSupplyOB].high : g_orderBlocks[confluentSupplyOB].high);
+         double obLow  = (supOBIsFromH1 ? g_h1OrderBlocks[confluentSupplyOB].low : g_orderBlocks[confluentSupplyOB].low);
          sweepBaseHigh = MathMax(sweepBaseHigh, obHigh);
 
          // Institute SELL from the 30-minute Supply Order Block:
@@ -11362,11 +11538,12 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
       g_setupClass           = SETUP_CLASS_A_CONTINUATION;
       g_setupQuality         = hasSupplyOBConfluence ? 98 : 95;
       triggerBarTime         = iTime(sym, PERIOD_M15, 1);
-      if(hasSupplyOBConfluence && g_orderBlocks[confluentSupplyOB].originTime > 0)
-         g_recentPivotTime = g_orderBlocks[confluentSupplyOB].originTime;
+      if(hasSupplyOBConfluence && (supOBIsFromH1 ? g_h1OrderBlocks[confluentSupplyOB].originTime : g_orderBlocks[confluentSupplyOB].originTime) > 0)
+         g_recentPivotTime = (supOBIsFromH1 ? g_h1OrderBlocks[confluentSupplyOB].originTime : g_orderBlocks[confluentSupplyOB].originTime);
 
       double entryTolerance = MathMax(0.35 * curAtr, 12.0 * pipSize);
-      bool is5thBounceReversalSell = (revSellM30B >= 4 || revSellH1B >= 3);
+      bool is5thBounceReversalSell = (revSellM30B >= InpReversalM30MinBounces ||
+                                      revSellH1B >= InpReversalH1MinBounces);
       bool priceAtEntrySell = (curPriceBid >= candEntry - entryTolerance && curPriceBid <= candSL);
 
       if(is5thBounceReversalSell && priceAtEntrySell)
@@ -11566,8 +11743,8 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
    if(isOBRetestAwait && InpOBPrioritizeOverChasing)
    {
       string obDir = (g_obSignalDirection == "BUY_AWAIT_PULLBACK") ? "BUY" : "SELL";
-      bool isConfirmedReversal = (obDir == "BUY" && (revBuyM30B >= 4 || revBuyH1B >= 3 || (isReversal && reversalDir == "BUY"))) ||
-                                 (obDir == "SELL" && (revSellM30B >= 4 || revSellH1B >= 3 || (isReversal && reversalDir == "SELL")));
+      bool isConfirmedReversal = (obDir == "BUY" && (revBuyM30B >= InpReversalM30MinBounces || revBuyH1B >= InpReversalH1MinBounces || (isReversal && reversalDir == "BUY"))) ||
+                                 (obDir == "SELL" && (revSellM30B >= InpReversalM30MinBounces || revSellH1B >= InpReversalH1MinBounces || (isReversal && reversalDir == "SELL")));
       bool obOpposesReversal = (isReversal && reversalDir != "NONE" && obDir != reversalDir && !isConfirmedReversal);
       // Directional Confluence Filter: Never await counter-trend pullbacks UNLESS confirmed 4-bounce reversal
       if(isUptrend && obDir == "SELL" && !isConfirmedReversal) obOpposesReversal = true;
@@ -12366,8 +12543,10 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          double allowedRetestDist = isGBPUSDOrAUDUSD ? MathMax(25.0 * pipSize, 0.75 * curAtr) : MathMax(15.0 * pipSize, 0.40 * curAtr);
          int h1Bounces = CountOrderBlockBounceCycles(sym, PERIOD_H1, g_obSignalLow, g_obSignalHigh, true, curAtr, pipSize, 48);
          int m30Bounces = CountOrderBlockBounceCycles(sym, PERIOD_M30, g_obSignalLow, g_obSignalHigh, true, curAtr, pipSize, 72);
-         bool has4M30Reversal = (m30Bounces >= 4);
-         bool has3BouncesAndRetest = (m30Bounces >= 3 || h1Bounces >= 3 || isGBPUSDOrAUDUSD || has4M30Reversal) && (curPrice <= g_obSignalHigh + allowedRetestDist && curPrice >= candSL);
+         bool has4M30Reversal = (m30Bounces >= InpReversalM30MinBounces);
+         bool has3BouncesAndRetest = (m30Bounces >= InpReversalM30MinBounces ||
+                                      h1Bounces >= InpReversalH1MinBounces || has4M30Reversal) &&
+                                     (curPrice <= g_obSignalHigh + allowedRetestDist && curPrice >= candSL);
          // USER DIRECTIVE: Trade is triggered when price hits or enters the Viable Order Block!
          // In an uptrend continuation, the Viable Demand Order Block zone is [g_obSignalLow, g_obSignalHigh].
          // When price enters the Order Block (curPrice <= g_obSignalHigh + touchTolPlanned && curPrice >= candSL),
@@ -12592,8 +12771,10 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          double allowedRetestDistSell = isTargetSymSell ? MathMax(25.0 * pipSize, 0.75 * curAtr) : MathMax(15.0 * pipSize, 0.40 * curAtr);
          int h1Bounces = CountOrderBlockBounceCycles(sym, PERIOD_H1, g_obSignalLow, g_obSignalHigh, false, curAtr, pipSize, 48);
          int m30Bounces = CountOrderBlockBounceCycles(sym, PERIOD_M30, g_obSignalLow, g_obSignalHigh, false, curAtr, pipSize, 72);
-         bool has4M30ReversalSell = (m30Bounces >= 4);
-         bool has3BouncesAndRetestSell = (m30Bounces >= 3 || h1Bounces >= 3 || isTargetSymSell || has4M30ReversalSell) && (curPrice >= g_obSignalLow - allowedRetestDistSell && curPrice <= candSL);
+         bool has4M30ReversalSell = (m30Bounces >= InpReversalM30MinBounces);
+         bool has3BouncesAndRetestSell = (m30Bounces >= InpReversalM30MinBounces ||
+                                          h1Bounces >= InpReversalH1MinBounces || has4M30ReversalSell) &&
+                                         (curPrice >= g_obSignalLow - allowedRetestDistSell && curPrice <= candSL);
          // USER DIRECTIVE: Trade is triggered when price hits or enters the Viable Order Block!
          // In a downtrend continuation, the Viable Supply Order Block zone is [g_obSignalLow, g_obSignalHigh].
          // When price enters the Order Block (curPrice >= g_obSignalLow - touchTolPlannedSell && curPrice <= candSL),
@@ -14432,21 +14613,17 @@ void CheckAndAutoTradeAdvice()
 
    // Recent wick touch detection on M1: allows faster reaction time when price wicks into zone and bounces
    double l0_M1 = iLow(_Symbol, PERIOD_M1, 0);
-   double l1_M1 = iLow(_Symbol, PERIOD_M1, 1);
    double h0_M1 = iHigh(_Symbol, PERIOD_M1, 0);
-   double h1_M1 = iHigh(_Symbol, PERIOD_M1, 1);
-   double minRecentLow = MathMin(l0_M1, l1_M1);
-   double maxRecentHigh = MathMax(h0_M1, h1_M1);
+   double minRecentLow = (l0_M1 > 0.0) ? MathMin(curP, l0_M1) : curP;
+   double maxRecentHigh = (h0_M1 > 0.0) ? MathMax(curP, h0_M1) : curP;
 
-   double l0_M5 = iLow(_Symbol, PERIOD_M5, 0), l1_M5 = iLow(_Symbol, PERIOD_M5, 1);
-   double h0_M5 = iHigh(_Symbol, PERIOD_M5, 0), h1_M5 = iHigh(_Symbol, PERIOD_M5, 1);
+   double l0_M5 = iLow(_Symbol, PERIOD_M5, 0);
+   double h0_M5 = iHigh(_Symbol, PERIOD_M5, 0);
    double l0_M15 = iLow(_Symbol, PERIOD_M15, 0);
    double h0_M15 = iHigh(_Symbol, PERIOD_M15, 0);
    if(l0_M5 > 0.0) minRecentLow = MathMin(minRecentLow, l0_M5);
-   if(l1_M5 > 0.0) minRecentLow = MathMin(minRecentLow, l1_M5);
    if(l0_M15 > 0.0) minRecentLow = MathMin(minRecentLow, l0_M15);
    if(h0_M5 > 0.0) maxRecentHigh = MathMax(maxRecentHigh, h0_M5);
-   if(h1_M5 > 0.0) maxRecentHigh = MathMax(maxRecentHigh, h1_M5);
    if(h0_M15 > 0.0) maxRecentHigh = MathMax(maxRecentHigh, h0_M15);
 
    bool priceAtPlannedZone = false;
@@ -16704,7 +16881,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.75", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.77", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {

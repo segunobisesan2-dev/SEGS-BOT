@@ -1,0 +1,30 @@
+SEGS Trade Manager Pro v3.77
+
+This release uses the user's uploaded v3.76 source as its base.
+
+Changes
+- Corrected demand/supply H1 fallback indexes that previously read the M30 array. With fewer M30 blocks, those paths could stop the EA with a fatal array-out-of-range error. This is an identified failure path, not proof of the cause of the reported terminal closure.
+- Added 30-second state checkpoints before the timer's readiness gate, including while market data is unavailable. Existing normal-shutdown state saving remains enabled. An abrupt crash can still lose changes since the last checkpoint.
+- Preserved chart visuals during terminal shutdown and parameter/account reinitialization; explicit EA removal still cleans its objects.
+- Throttled history readiness checks to once per second and reset H1 caches on symbol changes.
+- Added M30/configured OB timeframe and H1 supply/demand role reversal. A closed parent candle beyond the existing ATR/tick invalidation buffer reverses the block's direction. Wicks alone do not reverse it.
+- The breakout bar cannot qualify as its own retest. A later closed parent bar must overlap the zone and close above its high for new demand, or below its low for new supply. Waiting breakers are dashed gold outlines and are excluded from all entry, target and stop selection.
+- Reset touches, FVG, sweep, trend, viability and confirmation evidence on every conversion. Bounce counts are scoped to the latest conversion time. The original boundaries remain unchanged.
+- InpEnableOBRoleReversal defaults to true. InpOBMaxRoleReversals defaults to 3 and is clamped to 1..10; the next confirmed breach retires the origin. Pending and confirmed breakers can reverse again, within this limit.
+- Existing trend, confluence, permission, spread and risk checks still decide trade eligibility. Conversion does not force an immediate trade or bypass these checks.
+- Breaker state is reconstructed chronologically from closed history when the scanner restarts, within the configured OB lookback/zone limits. It is not an unlimited persistent archive of zones.
+
+Installation and restart
+1. Copy SEGS_Trade_Manager_Pro_v3.77.mq5 into MT5's MQL5/Experts folder via File > Open Data Folder.
+2. Compile with F7 in MetaEditor. Resolve any native compilation errors before attaching. This environment has no MetaEditor/MT5 installation.
+3. Replace the prior EA on the intended chart with the compiled v3.77. Initially leave Algo Trading disabled and test on a demo account.
+4. Save the chart profile using File > Profiles > Save As. Close MT5 normally and reopen the same terminal data folder and profile. Verify the EA remains on the chart and restores its settings.
+5. Test timeframe changes, reconnects, a wick-only breach, both close-confirmed conversions, waiting retests, successful retests, and a failed breaker. Enable demo Algo Trading only after these checks.
+
+MT5 owns attachment/profile restoration. An EA cannot run while the terminal is closed, prevent an operating-system crash, restore a deleted chart, or override removal/replacement by another EA/template. This source does not call ExpertRemove, TerminalClose or ChartClose. No automatic reattachment that overrides manual removal is installed. If MT5 closes again, inspect Experts/Journal and the last SEGS DEINIT/SEGS_PHASE diagnostic.
+
+Verification
+- Existing extracted-function C++ regressions and source synchronization/lexical checks passed, including 24 structural-stop assertions.
+- 10 new scenarios passed using the actual role-reversal helpers and actual closed-bar replay loop extracted from the EA, compiled with g++ -std=c++17 -Wall -Wextra -Werror.
+- New source checks cover M30/H1 integration, bounce epoch reset, source-array selection and timer checkpoints.
+These are not native MQL5 compilation, Strategy Tester, live trading, or terminal restart tests.

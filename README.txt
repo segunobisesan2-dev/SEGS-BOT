@@ -1,3 +1,13 @@
+# SEGS-BOT — full EA v3.77
+
+The latest source is `SEGS_Trade_Manager_Pro_v3.77.mq5`, based on the uploaded v3.76. Read `public/SEGS_v3.77_RELEASE_NOTES.txt` for installation and restart checks.
+
+This release fixes wrong-array reads on H1 fallback zones, adds periodic state saving and shutdown visual preservation, and implements closed-candle supply/demand conversion followed by a separate confirmed retest. Converted blocks retain normal strategy and risk gates. MT5 itself restores saved profile attachments; terminal shutdown/crashes cannot be prevented by an EA.
+
+Validation: `python tests/verify_source.py` and `python tests/role_reversal_test.py` pass. Native MetaEditor compilation and MT5 restart tests remain required. Compatibility `.mq5` downloads and embedded TypeScript source are synchronized to v3.77.
+
+The earlier release notes below describe retained behavior and prior validation.
+
 # SEGS-BOT — full EA v3.75
 
 [Download the full MT5 source](https://raw.githubusercontent.com/segunobisesan2-dev/SEGS-BOT/main/SEGS_Trade_Manager_Pro_v3.75.mq5)
