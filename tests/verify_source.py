@@ -7,6 +7,12 @@ assert all(p.read_text()==s for p in root.rglob('*.mq5'))
 ts=(root/'src/data/mql5Code.ts').read_text()
 assert json.loads(ts.split(' = ',1)[1].split(';\nexport default',1)[0])==s
 assert s.count('allowAutoTrade=false')==1
+# Restored setup identity lives in the global; signalID is only a parameter elsewhere.
+restore=s[s.index('void RestoreActiveSignalSnapshot(string sym)\n{'):s.index('void RestoreActiveSignalSnapshot(string sym)\n{')+20000]
+restore=restore[:restore.index('\n}')+2]
+assert not re.search(r'\bsignalID\b', restore)
+assert 'HasOpenAdvisorTradesForSignal(sym, g_currentSignalID)' in restore
+
 # Regression: removed GBPUSD branch must not leave either undeclared reference.
 assert not re.search(r'\bisGBPUSD\b', s)
 assert 'bestTP2 = 1.33200' not in s and 'bestTP3 = 1.33690' not in s
@@ -22,7 +28,7 @@ assert 'SERIES_SYNCHRONIZED' in s and 'BarsCalculated(handles[h])' in s
 init=s[s.index('int OnInit()'):s.index('void ReleaseIndicatorHandles()')]
 assert 'RunAdvisorStrategyEngine(' not in init and 'return(INIT_SUCCEEDED)' in init
 assert 'CopyRates(_Symbol, frames[i], 0, minimums[i], bootstrap)' in s
-assert 'input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_AUTO_DUAL;' in s
+assert 'input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_ORDER_BLOCK;' in s
 assert 'if(!MathIsValidNumber(pipSize) || pipSize <= 0.0) return tp;' in s
 assert s.count('!MathIsValidNumber(tickVal) || tickVal <= 0.0) return 0.0;') >= 2
 assert 'SEGS_DASH_VIS_' in s and 'SEGS_SYNC_SYS' in s

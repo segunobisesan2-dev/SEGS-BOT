@@ -6856,7 +6856,7 @@ void RestoreActiveSignalSnapshot(string sym)
          g_currentSignalID = "RESTORED_" + sym + "_" + TimeToString(g_signalTriggerTime, TIME_MINUTES);
       }
 
-      int openCount = HasOpenAdvisorTradesForSignal(sym, signalID) ? 1 : 0;
+      int openCount = HasOpenAdvisorTradesForSignal(sym, g_currentSignalID) ? 1 : 0;
       if(openCount > 0)
       {
          g_currentTradeTaken = true;

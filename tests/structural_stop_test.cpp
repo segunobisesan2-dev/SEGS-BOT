@@ -113,7 +113,7 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
       anchor = buy ? activeLow : activeHigh;
       buffer = MathMax(g_systemOBBufferATR * atr, g_systemOBBufferTicks * tick);
    }
-   else if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
+   else if(style == SL_STYLE_ORDER_BLOCK) { anchor = boundary; buffer = 0.0; }
    else if(style == SL_STYLE_MULTI_DAY)
    {
       anchor = extreme;
@@ -128,15 +128,18 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
    if(!SymbolInfoTick(sym, quote) || !MathIsValidNumber(quote.bid) ||
       !MathIsValidNumber(quote.ask) || quote.bid <= 0.0 || quote.ask < quote.bid) return 0.0;
    double distance = MathMax((double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * pt, tick) + 2.0 * tick;
+   if(style == SL_STYLE_ORDER_BLOCK &&
+      (buy ? stop > MathMin(entryPrice, quote.bid) - distance : stop < MathMax(entryPrice, quote.ask) + distance)) return 0.0;
    if(buy) stop = MathMin(stop, MathMin(entryPrice, quote.bid) - distance);
    else stop = MathMax(stop, MathMax(entryPrice, quote.ask) + distance);
    // Round away from invalidation, never towards the OB or broker boundary.
    stop = (buy ? MathFloor(stop / tick) : MathCeil(stop / tick)) * tick;
    stop = NormalizeDouble(stop, digits);
    if(!MathIsValidNumber(stop) || stop <= 0.0) return 0.0;
-   if(validOB && style != SL_STYLE_ACTIVE_ORDER_BLOCK && (buy ? stop >= boundary : stop <= boundary)) return 0.0;
+   if(validOB && style != SL_STYLE_ACTIVE_ORDER_BLOCK && style != SL_STYLE_ORDER_BLOCK && (buy ? stop >= boundary : stop <= boundary)) return 0.0;
    return stop;
 }
+
 
 
 int main(){
@@ -147,9 +150,15 @@ int main(){
  v=GetSafestStructuralStopLoss("TEST","SELL",100,100.3,101,1);
  assert(std::abs(v-101.4)<1e-8);
  g_systemStopStyle=SL_STYLE_ORDER_BLOCK;
- assert(std::abs(GetSafestStructuralStopLoss("TEST","BUY",100,99,99.7,1)-98.8)<1e-8);
- assert(std::abs(GetSafestStructuralStopLoss("TEST","SELL",100,100.3,101,1)-101.2)<1e-8);
+ assert(std::abs(GetSafestStructuralStopLoss("TEST","BUY",100,99,99.7,1)-99.0)<1e-8);
+ assert(std::abs(GetSafestStructuralStopLoss("TEST","SELL",100,100.3,101,1)-101.0)<1e-8);
  assert(GetSafestStructuralStopLoss("TEST","BUY",100,0,0,1)==0);
+ stops=250;
+ assert(GetSafestStructuralStopLoss("TEST","BUY",100,99,99.7,1)==0);
+ assert(GetSafestStructuralStopLoss("TEST","SELL",100,100.3,101,1)==0);
+ stops=0;
+ assert(std::abs(GetSafestStructuralStopLoss("TEST","BUY",100,99,99.7,50)-99)<1e-8);
+
  g_systemStopStyle=SL_STYLE_MULTI_DAY;
  assert(std::abs(GetSafestStructuralStopLoss("TEST","BUY",100,99,99.7,1)-89.8)<1e-8);
  assert(std::abs(GetSafestStructuralStopLoss("TEST","SELL",100,100.3,101,1)-110.2)<1e-8);
@@ -193,5 +202,5 @@ int main(){
  assert(std::abs(GetSafestStructuralStopLoss("TEST","BUY",100,99,99.7,1)-98.5)<1e-8);
  highs[1][1]=101.3;highs[1][2]=100.8;highs[1][3]=100.7;
  assert(std::abs(GetSafestStructuralStopLoss("TEST","SELL",100,100.3,101,1)-101.5)<1e-8);
- std::cout<<"24 structural-stop assertions passed\n";
+ std::cout<<"27 structural-stop assertions passed\n";
 }

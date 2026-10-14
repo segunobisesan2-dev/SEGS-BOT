@@ -906,20 +906,20 @@ enum ENUM_SEGS_SL_STYLE
    SL_STYLE_ACTIVE_ORDER_BLOCK = 3
 };
 input group "=== System Structural Stop Loss ==="
-input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_AUTO_DUAL;
+input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_ORDER_BLOCK;
 input bool InpPublishStopSettingsToAllCharts = false; // Set true on one chart to publish these inputs
 input double InpActiveOBBufferATR = 0.05; // Small buffer beyond active OB floor/ceiling
 input int InpActiveOBBufferTicks = 3;
 input double InpActiveOBMaxDistanceATR = 3.0;
 input bool InpTrailActiveOrderBlock = true; // Tighten existing advisor positions only
-ENUM_SEGS_SL_STYLE g_systemStopStyle = SL_STYLE_AUTO_DUAL;
+ENUM_SEGS_SL_STYLE g_systemStopStyle = SL_STYLE_ORDER_BLOCK;
 double g_systemOBBufferATR = 0.05, g_systemOBMaxDistanceATR = 3.0;
 int g_systemOBBufferTicks = 3;
 bool g_systemTrailOB = true;
 
 string SEGSStopKey(string field)
 {
-   return "SEGS_SL_V2_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + field;
+   return "SEGS_SL_V3_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + field;
 }
 
 void SEGSSyncStopSettings(bool publish=false)
@@ -957,7 +957,7 @@ bool SEGSMarketReady(string sym)
 
 bool SEGSEnsureRuntimeReady()
 {
-   if(!SEGSMarketReady(_Symbol)) return false;
+   if(!SEGSMarketReady(_Symbol)) { g_runtimeReady = false; return false; }
    static ulong nextRetryMs = 0;
    ulong now = GetTickCount64();
    if(!g_runtimeReady && now < nextRetryMs) return false;
@@ -973,13 +973,14 @@ bool SEGSEnsureRuntimeReady()
       int copied = CopyRates(_Symbol, frames[i], 0, minimums[i], bootstrap);
       if(copied < minimums[i] || !SeriesInfoInteger(_Symbol, frames[i], SERIES_SYNCHRONIZED) || iBars(_Symbol, frames[i]) < minimums[i])
       {
+         g_runtimeReady = false;
          Comment("SEGS: waiting for synchronized chart history; EA remains attached.");
          return false;
       }
    }
    int handles[] = {g_hAtr_H1, g_hEma20_H1, g_hEma50_H1, g_hEma20_H2, g_hEma50_H2, g_hEma20_H4, g_hEma50_H4};
    for(int h = 0; h < ArraySize(handles); h++)
-      if(handles[h] == INVALID_HANDLE || BarsCalculated(handles[h]) < 3) return false;
+      if(handles[h] == INVALID_HANDLE || BarsCalculated(handles[h]) < 3) { g_runtimeReady = false; return false; }
    if(!g_runtimeReady)
    {
       InitIndicatorHandles(_Symbol);
@@ -1435,11 +1436,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             string gvCdKey = "SEGS_COOLDOWN_" + cleanSym + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
              GlobalVariableSet(gvCdKey, (double)(TimeCurrent() + 15)); // 15-second anti-spam cooldown
 
-            if(g_currentSignalID != "")
-            {
-               string sigExecKey = "SEGS_SIG_EXEC_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + g_currentSignalID;
-               GlobalVariableSet(sigExecKey, 4.0); // 4.0 = MANUALLY CLOSED / CONSUMED
-            }
+            // The current candidate can belong to a different set. Its dedup record is untouched.
             g_currentTradeTaken = true;
          }
          return;
@@ -6097,49 +6094,31 @@ int CountOpenAdvisorTradesForSymbol(string sym)
 
 int CountOpenAdvisorSetsForSymbol(string sym)
 {
-   datetime openTimes[];
-   ArrayResize(openTimes, 0);
-   int setCount = 0;
-   
+   string ids[];
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong ticket = PositionGetTicket(i);
-      if(ticket > 0 && posInfo.SelectByTicket(ticket))
+      if(ticket == 0 || !posInfo.SelectByTicket(ticket) || posInfo.Symbol() != sym) continue;
+      string cmt = posInfo.Comment();
+      int start = StringFind(cmt, "SEGS|ADV|");
+      if(posInfo.Magic() != InpAdvisorMagicNumber && start < 0) continue;
+      // Identity, not opening time: slow fills stay one set; simultaneous opposite sets stay two.
+      string id = "LEGACY_" + IntegerToString((long)ticket);
+      if(start >= 0)
       {
-         if(posInfo.Symbol() == sym)
-         {
-            long magic = posInfo.Magic();
-            bool isAdv = (magic == InpAdvisorMagicNumber);
-            if(!isAdv)
-            {
-               string cmt = posInfo.Comment();
-               if(StringFind(cmt, "[MyAdvisor]") >= 0 || StringFind(cmt, "SEGS|ADV") >= 0 || StringFind(cmt, "[Advised") >= 0)
-                  isAdv = true;
-            }
-            if(isAdv)
-            {
-               datetime posTime = (datetime)PositionGetInteger(POSITION_TIME);
-               bool found = false;
-               for(int k = 0; k < ArraySize(openTimes); k++)
-               {
-                  if(MathAbs((long)(posTime - openTimes[k])) <= 5)
-                  {
-                     found = true;
-                     break;
-                  }
-               }
-               if(!found)
-               {
-                  int sz = ArraySize(openTimes);
-                  ArrayResize(openTimes, sz + 1);
-                  openTimes[sz] = posTime;
-                  setCount++;
-               }
-            }
-         }
+         int finish = StringFind(cmt, "|", start + 9);
+         if(finish > start + 9) id = StringSubstr(cmt, start + 9, finish - start - 9);
+      }
+      bool found = false;
+      for(int k = 0; k < ArraySize(ids); k++) if(ids[k] == id) { found = true; break; }
+      if(!found)
+      {
+         int n = ArraySize(ids);
+         if(ArrayResize(ids, n + 1) != n + 1) return 2; // Fail closed on allocation failure.
+         ids[n] = id;
       }
    }
-   return setCount;
+   return ArraySize(ids);
 }
 
 bool HasOpenAdvisorTradesForSignal(string sym, string signalID)
@@ -6164,7 +6143,7 @@ bool HasOpenAdvisorTradesForSignal(string sym, string signalID)
             if(magic == InpAdvisorMagicNumber)
             {
                string cmt = posInfo.Comment();
-               if(shortSig == "" || StringFind(cmt, shortSig) >= 0 || StringFind(cmt, "SEGS|ADV|") >= 0 || StringFind(cmt, "[MyAdvisor]") >= 0)
+               if(StringFind(cmt, "SEGS|ADV|" + shortSig + "|") >= 0)
                   return true;
             }
          }
@@ -6410,7 +6389,7 @@ bool CheckConfirmedSafeZoneBounce(string sym, string dir, double safeEntry)
 
 bool IsAdvisorTradeTaken(string sym, string signalID)
 {
-   int openCount = CountOpenAdvisorTradesForSymbol(sym);
+   int openCount = HasOpenAdvisorTradesForSignal(sym, signalID) ? 1 : 0;
    if(openCount > 0)
    {
       g_currentTradeTaken = true;
@@ -6424,6 +6403,7 @@ bool IsAdvisorTradeTaken(string sym, string signalID)
       if(GlobalVariableCheck(sigExecKey))
       {
          double state = GlobalVariableGet(sigExecKey);
+         if(state >= 2.0) return true;
          if(state == 1.0)
          {
             string pendingTimeKey = "SEGS_SIG_PENDING_TIME_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + signalID;
@@ -6468,7 +6448,7 @@ datetime GetAdvisorTradeExecutionTime(string sym, string signalID)
             if(magic == InpAdvisorMagicNumber)
             {
                string cmt = posInfo.Comment();
-               if(shortSig == "" || StringFind(cmt, shortSig) >= 0 || StringFind(cmt, "SEGS|ADV|") >= 0 || StringFind(cmt, "[MyAdvisor]") >= 0)
+               if(StringFind(cmt, "SEGS|ADV|" + shortSig + "|") >= 0)
                {
                   datetime posTime = (datetime)PositionGetInteger(POSITION_TIME);
                   if(posTime > 0) return posTime;
@@ -6876,7 +6856,7 @@ void RestoreActiveSignalSnapshot(string sym)
          g_currentSignalID = "RESTORED_" + sym + "_" + TimeToString(g_signalTriggerTime, TIME_MINUTES);
       }
 
-      int openCount = CountOpenAdvisorTradesForSymbol(sym);
+      int openCount = HasOpenAdvisorTradesForSignal(sym, g_currentSignalID) ? 1 : 0;
       if(openCount > 0)
       {
          g_currentTradeTaken = true;
@@ -7652,7 +7632,7 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
       anchor = buy ? activeLow : activeHigh;
       buffer = MathMax(g_systemOBBufferATR * atr, g_systemOBBufferTicks * tick);
    }
-   else if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
+   else if(style == SL_STYLE_ORDER_BLOCK) { anchor = boundary; buffer = 0.0; }
    else if(style == SL_STYLE_MULTI_DAY)
    {
       anchor = extreme;
@@ -7667,13 +7647,15 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
    if(!SymbolInfoTick(sym, quote) || !MathIsValidNumber(quote.bid) ||
       !MathIsValidNumber(quote.ask) || quote.bid <= 0.0 || quote.ask < quote.bid) return 0.0;
    double distance = MathMax((double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * pt, tick) + 2.0 * tick;
+   if(style == SL_STYLE_ORDER_BLOCK &&
+      (buy ? stop > MathMin(entryPrice, quote.bid) - distance : stop < MathMax(entryPrice, quote.ask) + distance)) return 0.0;
    if(buy) stop = MathMin(stop, MathMin(entryPrice, quote.bid) - distance);
    else stop = MathMax(stop, MathMax(entryPrice, quote.ask) + distance);
    // Round away from invalidation, never towards the OB or broker boundary.
    stop = (buy ? MathFloor(stop / tick) : MathCeil(stop / tick)) * tick;
    stop = NormalizeDouble(stop, digits);
    if(!MathIsValidNumber(stop) || stop <= 0.0) return 0.0;
-   if(validOB && style != SL_STYLE_ACTIVE_ORDER_BLOCK && (buy ? stop >= boundary : stop <= boundary)) return 0.0;
+   if(validOB && style != SL_STYLE_ACTIVE_ORDER_BLOCK && style != SL_STYLE_ORDER_BLOCK && (buy ? stop >= boundary : stop <= boundary)) return 0.0;
    return stop;
 }
 
@@ -8233,8 +8215,8 @@ void UpdateM30OrderBlocks(bool forceScan=false)
 
       double bodyHigh = MathMax(r[i].open, r[i].close);
       double bodyLow  = MathMin(r[i].open, r[i].close);
-      double zoneHigh = (InpOBZoneMethod == OB_BODY_ONLY ? bodyHigh : r[i].high);
-      double zoneLow  = (InpOBZoneMethod == OB_BODY_ONLY ? bodyLow  : r[i].low);
+      double zoneHigh = r[i].high;
+      double zoneLow  = r[i].low;
 
       double priorHigh = r[i + 1].high;
       double priorLow  = r[i + 1].low;
@@ -8358,7 +8340,7 @@ void UpdateM30OrderBlocks(bool forceScan=false)
          ob.status = "BROKEN";
          ob.qualityScore = -35;
          int n = ArraySize(g_orderBlocks);
-         ArrayResize(g_orderBlocks, n + 1);
+         if(ArrayResize(g_orderBlocks, n + 1) != n + 1) return;
          g_orderBlocks[n] = ob;
          continue;
       }
@@ -8474,7 +8456,7 @@ void UpdateM30OrderBlocks(bool forceScan=false)
       ob.qualityScore = (int)MathMax(0, MathMin(100, ob.qualityScore));
 
       int n = ArraySize(g_orderBlocks);
-      ArrayResize(g_orderBlocks, n + 1);
+      if(ArrayResize(g_orderBlocks, n + 1) != n + 1) return;
       g_orderBlocks[n] = ob;
    }
 
@@ -8670,8 +8652,8 @@ void UpdateH1OrderBlocks(bool forceScan=false)
       bool bearishOrigin = (r[i].close > r[i].open || base);
       double bodyHigh = MathMax(r[i].open, r[i].close);
       double bodyLow  = MathMin(r[i].open, r[i].close);
-      double zoneHigh = (InpOBZoneMethod == OB_BODY_ONLY ? bodyHigh : r[i].high);
-      double zoneLow  = (InpOBZoneMethod == OB_BODY_ONLY ? bodyLow  : r[i].low);
+      double zoneHigh = r[i].high;
+      double zoneLow  = r[i].low;
 
       double priorHigh = r[i + 1].high;
       double priorLow  = r[i + 1].low;
@@ -8776,7 +8758,7 @@ void UpdateH1OrderBlocks(bool forceScan=false)
          ob.status = "BROKEN";
          ob.qualityScore = -35;
          int sz = ArraySize(g_h1OrderBlocks);
-         ArrayResize(g_h1OrderBlocks, sz + 1);
+         if(ArrayResize(g_h1OrderBlocks, sz + 1) != sz + 1) return;
          g_h1OrderBlocks[sz] = ob;
          continue;
       }
@@ -8787,7 +8769,7 @@ void UpdateH1OrderBlocks(bool forceScan=false)
       else ob.status = "RETESTED H1";
 
       int sz = ArraySize(g_h1OrderBlocks);
-      ArrayResize(g_h1OrderBlocks, sz + 1);
+      if(ArrayResize(g_h1OrderBlocks, sz + 1) != sz + 1) return;
       g_h1OrderBlocks[sz] = ob;
    }
 
@@ -10494,136 +10476,13 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
    datetime curH1BarTime = iTime(sym, PERIOD_H1, 0);
    datetime triggerBarTime = iTime(sym, PERIOD_H1, 1);
 
-   // 6B. ACTIVE SAFE TRADE RUNNING ON SYMBOL GUARD
-   // User Mandate: "When there is an open safe trade, there is no need to take another less safe trade
-   // except price is confirmed to have returned to and bounce off the safe trade zone(entry zone)."
-   string activeTradeDir = "NONE";
-   double activeSafeEntry = 0.0, activeSafeSL = 0.0;
-   double activeSafeTP1 = 0.0, activeSafeTP2 = 0.0, activeSafeTP3 = 0.0, activeSafeTP4 = 0.0;
-   int openSafeCount = 0;
-   
-   if(GetOpenAdvisorTradeDetails(sym, activeTradeDir, activeSafeEntry, activeSafeSL, activeSafeTP1, activeSafeTP2, activeSafeTP3, activeSafeTP4, openSafeCount))
+   // Existing sets are managed by ticket; scanning remains independent of their direction.
+   if(CountOpenAdvisorSetsForSymbol(sym) >= MathMax(1, MathMin(2, InpMaxSetsPerSymbol)))
    {
-      double curPrice = SymbolInfoDouble(sym, SYMBOL_BID);
-      if(curPrice <= 0.0) curPrice = iClose(sym, PERIOD_M1, 0);
-      if(curPrice <= 0.0) curPrice = iClose(sym, PERIOD_H1, 0);
-
-      double pip = pipSize;
-      double curAtr = 0.0;
-      if(g_hAtr_H1 != INVALID_HANDLE)
-      {
-         double atrBuf[];
-         ArraySetAsSeries(atrBuf, true);
-         if(CopyBuffer(g_hAtr_H1, 0, 1, 1, atrBuf) == 1) curAtr = atrBuf[0];
-      }
-      if(curAtr <= 0.0) curAtr = 20.0 * pip;
-
-      double safeZoneTolerance = MathMax(0.50 * curAtr, 15.0 * pip);
-      double distFromSafeEntry = MathAbs(curPrice - activeSafeEntry);
-      bool isInsideSafeZone = (distFromSafeEntry <= safeZoneTolerance);
-
-      // Lock onto active safe trade coordinates - never arm secondary extended setups!
-      g_currentAdvisedAction = activeTradeDir;
-      g_staticEntryPrice = activeSafeEntry;
-      g_staticSL = activeSafeSL;
-      // SYSTEM-LEVEL STRUCTURAL STOP LOSS:
-      // Evaluates Order Block floor/ceiling and allows multi-day swing low/high as safest anchor!
-      if(g_staticSL <= 0.0)
-      {
-         double obL = (g_obSignalLow > 0.0) ? g_obSignalLow : 0.0;
-         double obH = (g_obSignalHigh > 0.0) ? g_obSignalHigh : 0.0;
-         g_staticSL = GetSafestStructuralStopLoss(sym, activeTradeDir, g_staticEntryPrice, obL, obH, curAtr, false);
-         if(g_staticSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
-      }
-      long stopLevel = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
-      double minStopDist = (double)stopLevel * pt;
-      if(minStopDist < pt) minStopDist = pt;
-      double minSafeDistActive = MathMax(minStopDist + 2.0 * pt, MathMax(18.0 * pip, 0.40 * curAtr));
-      if(g_staticSL <= 0.0)
-      {
-         g_staticSL = (activeTradeDir == "BUY") ? (g_staticEntryPrice - minSafeDistActive) : (g_staticEntryPrice + minSafeDistActive);
-         g_staticSL = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticSL), digits);
-      }
-      if(activeSafeTP1 > 0.0) g_staticTP1 = activeSafeTP1;
-      if(activeSafeTP2 > 0.0) g_staticTP2 = activeSafeTP2;
-      if(activeSafeTP3 > 0.0) g_staticTP3 = activeSafeTP3;
-      if(activeSafeTP4 > 0.0) g_staticTP4 = activeSafeTP4;
-
-      // Absolute Guarantee: Stop loss distance CAN NEVER be larger than any Take-Profit distance!
-      double aRisk = MathAbs(g_staticEntryPrice - g_staticSL);
-      if(aRisk <= 0.0) aRisk = MathMax(20.0 * pip, 20.0 * pt);
-      double mSep = MathMax(0.80 * aRisk, 15.0 * pt);
-      if(activeTradeDir == "BUY")
-      {
-         if(g_staticTP1 < g_staticEntryPrice + 1.20 * aRisk) g_staticTP1 = g_staticEntryPrice + 1.40 * aRisk;
-         if(g_staticTP2 < g_staticTP1 + mSep || g_staticTP2 < g_staticEntryPrice + 2.10 * aRisk) g_staticTP2 = g_staticTP1 + MathMax(0.80 * aRisk, mSep);
-         if(g_staticTP3 < g_staticTP2 + mSep || g_staticTP3 < g_staticEntryPrice + 3.60 * aRisk) g_staticTP3 = g_staticTP2 + MathMax(1.20 * aRisk, mSep);
-         if(g_staticTP4 < g_staticTP3 + mSep || g_staticTP4 < g_staticEntryPrice + 6.00 * aRisk) g_staticTP4 = g_staticTP3 + MathMax(2.00 * aRisk, mSep);
-      }
-      else if(activeTradeDir == "SELL")
-      {
-         if(g_staticTP1 > g_staticEntryPrice - 1.20 * aRisk || g_staticTP1 <= 0.0) g_staticTP1 = g_staticEntryPrice - 1.40 * aRisk;
-         if(g_staticTP2 > g_staticTP1 - mSep || g_staticTP2 <= 0.0 || g_staticTP2 > g_staticEntryPrice - 2.10 * aRisk) g_staticTP2 = g_staticTP1 - MathMax(0.80 * aRisk, mSep);
-         if(g_staticTP3 > g_staticTP2 - mSep || g_staticTP3 <= 0.0 || g_staticTP3 > g_staticEntryPrice - 3.60 * aRisk) g_staticTP3 = g_staticTP2 - MathMax(1.20 * aRisk, mSep);
-         if(g_staticTP4 > g_staticTP3 - mSep || g_staticTP4 <= 0.0 || g_staticTP4 > g_staticEntryPrice - 6.00 * aRisk) g_staticTP4 = g_staticTP3 - MathMax(2.00 * aRisk, mSep);
-      }
-      g_staticTP1 = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticTP1), digits);
-      g_staticTP2 = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticTP2), digits);
-      g_staticTP3 = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticTP3), digits);
-      g_staticTP4 = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticTP4), digits);
-      g_hasViableEntry = true;
-      g_currentTradeTaken = true;
-      g_isGateOpen = true;
-
-      // Check if price returned to and bounced off the safe trade zone
-      if(!isInsideSafeZone)
-      {
-         // Price is extended away from safe zone (e.g. at 4381 vs safe entry 4342) - strictly block secondary entries!
-         g_setupState = "TRIGGERED";
-         g_primaryRejectionReason = StringFormat("DISCIPLINE: Active safe %s trade running @ %s (%d leg(s)). Do not take less safe trades. Price extended by %.1f pips.",
-                                                 activeTradeDir, DoubleToString(activeSafeEntry, digits), openSafeCount, distFromSafeEntry / pip);
-         g_blockReason = g_primaryRejectionReason;
-         g_signalStatusLabel = StringFormat("POSITION ACTIVE: %s [%d Open @ %s | Monitoring]", activeTradeDir, openSafeCount, DoubleToString(activeSafeEntry, digits));
-         UpdateTradeAdviceLines();
-         return;
-      }
-      else
-      {
-         // Price has returned to the safe trade zone! Check for confirmed bounce on M5/M15
-         bool confirmedBounce = CheckConfirmedSafeZoneBounce(sym, activeTradeDir, activeSafeEntry);
-         if(!confirmedBounce)
-         {
-            g_setupState = "WATCHING";
-            g_primaryRejectionReason = StringFormat("RETURNING TO SAFE ZONE: Price at %s (near safe entry %s). Awaiting confirmed bounce before considering additional entry.",
-                                                    DoubleToString(curPrice, digits), DoubleToString(activeSafeEntry, digits));
-            g_blockReason = g_primaryRejectionReason;
-            g_signalStatusLabel = StringFormat("TESTING SAFE ZONE @ %s (AWAITING BOUNCE)", DoubleToString(activeSafeEntry, digits));
-            UpdateTradeAdviceLines();
-            return;
-         }
-         else
-         {
-            // Confirmed bounce off safe zone! Check portfolio ceiling
-            int openAdvTrades = CountTotalOpenAdvisorTrades();
-            int portfolioCeiling = MathMax(24, InpMaxOpenAdvisorTradesPortfolio);
-            if(openAdvTrades >= portfolioCeiling || openSafeCount >= InpAdvisorMaxTradesPerSetup)
-            {
-               g_setupState = "TRIGGERED";
-               g_primaryRejectionReason = StringFormat("SAFE ZONE BOUNCE CONFIRMED but max trades reached (%d/%d). Position active.", openSafeCount, InpAdvisorMaxTradesPerSetup);
-               g_blockReason = g_primaryRejectionReason;
-               g_signalStatusLabel = StringFormat("SAFE BOUNCE @ %s (MAX TRADES REACHED)", DoubleToString(activeSafeEntry, digits));
-               UpdateTradeAdviceLines();
-               return;
-            }
-            // Allow re-entry at safe zone only!
-            g_setupState = "READY";
-            g_signalStatusLabel = StringFormat("SAFE ZONE RETEST BOUNCE CONFIRMED @ %s", DoubleToString(activeSafeEntry, digits));
-            g_primaryRejectionReason = "Safe zone retest bounce confirmed. Ready for addition.";
-            g_blockReason = "";
-            UpdateTradeAdviceLines();
-            return;
-         }
-      }
+      g_hasViableEntry = false;
+      g_setupState = "WATCHING";
+      g_blockReason = "TWO-SET SYMBOL CAPACITY REACHED";
+      return;
    }
 
    static datetime s_lastSubScanTime = 0;
@@ -10631,7 +10490,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
    // CRITICAL PULLBACK & RETEST ARRIVAL TRIGGER:
    // If a planned entry or order block retest level is waiting (e.g. in WATCHING state),
    // first evaluate viability in real-time. If price has moved adverse or breached limits, CANCEL IMMEDIATELY!
-   if(g_staticEntryPrice > 0.0 && g_staticSL > 0.0 && CountOpenAdvisorTradesForSymbol(sym) == 0)
+   if(g_staticEntryPrice > 0.0 && g_staticSL > 0.0 && !IsAdvisorTradeTaken(sym, g_currentSignalID))
    {
       double curBidCheck = SymbolInfoDouble(sym, SYMBOL_BID);
       double curAskCheck = SymbolInfoDouble(sym, SYMBOL_ASK);
@@ -10753,7 +10612,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          }
       }
 
-      if((isTouched || isTouchingOB) && CountOpenAdvisorTradesForSymbol(sym) == 0)
+      if((isTouched || isTouchingOB) && !IsAdvisorTradeTaken(sym, g_currentSignalID))
       {
          double triggeredPrice = isTouchingOB ? obLevel : (isTouched ? g_staticEntryPrice : curPrice);
          PrintFormat("[Trade Advisor] >>> VIABLE ORDER BLOCK / PULLBACK TOUCH TRIGGERED on %s: Price reached %s level %s (%s)! Promoting immediately to TRIGGERED for execution.",
@@ -10775,14 +10634,14 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
    }
 
    // If already TRIGGERED or READY on this bar, monitor SL hit, validity, and viability without rewriting target levels
-   if(!forceScan && curH1BarTime == g_lastAdviceScanBarTime && (g_setupState == "TRIGGERED" || g_setupState == "READY") && g_hasViableEntry && !g_isSignalExpired)
+   if(!forceScan && !IsAdvisorTradeTaken(sym, g_currentSignalID) && curH1BarTime == g_lastAdviceScanBarTime && (g_setupState == "TRIGGERED" || g_setupState == "READY") && g_hasViableEntry && !g_isSignalExpired)
    {
       double curPrice = SymbolInfoDouble(sym, SYMBOL_BID);
       if(curPrice <= 0.0) curPrice = iClose(sym, PERIOD_M1, 0);
       if(curPrice <= 0.0) curPrice = iClose(sym, PERIOD_H1, 0);
 
       // Check if position is open and taken in market
-      if(CountOpenAdvisorTradesForSymbol(sym) > 0)
+      if(HasOpenAdvisorTradesForSignal(sym, g_currentSignalID))
       {
          if((g_currentAdvisedAction == "BUY" && curPrice <= g_staticSL) ||
             (g_currentAdvisedAction == "SELL" && curPrice >= g_staticSL))
@@ -10817,7 +10676,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          else
          {
             // Signal is still viable and waiting for entry
-            if(CountOpenAdvisorTradesForSymbol(sym) == 0)
+            if(!IsAdvisorTradeTaken(sym, g_currentSignalID))
             {
                g_currentTradeTaken = false;
                g_setupState = "READY";
@@ -10848,7 +10707,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
 
    // STALE SIGNAL TREND-REVERSAL INVALIDATION GUARD:
    // If market trend has reversed across H1/H2/H4, immediately purge any opposing stale signal and pivot!
-   if(CountOpenAdvisorTradesForSymbol(sym) == 0 && g_hasViableEntry)
+   if(!IsAdvisorTradeTaken(sym, g_currentSignalID) && g_hasViableEntry)
    {
       if(g_currentAdvisedAction == "SELL" && (h1Bull && (h2Bull || h4Bull)))
       {
@@ -11219,7 +11078,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
                      sym, candEntry, candSL);
          UpdateTradeAdviceLines();
          if(g_showSentimentHUD) DrawSentimentHUD();
-         if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+         if(g_myAdvisorEnabled && !IsAdvisorTradeTaken(sym, g_currentSignalID))
          {
             CheckAndAutoTradeAdvice();
          }
@@ -11381,7 +11240,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
                      sym, candEntry, candSL);
          UpdateTradeAdviceLines();
          if(g_showSentimentHUD) DrawSentimentHUD();
-         if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+         if(g_myAdvisorEnabled && !IsAdvisorTradeTaken(sym, g_currentSignalID))
          {
             CheckAndAutoTradeAdvice();
          }
@@ -11684,7 +11543,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             g_primaryRejectionReason = "NONE (VIABLE ORDER BLOCK ENTERED - EXECUTING)";
             g_blockReason = "NONE (LEVEL TOUCHED)";
             UpdateTradeAdviceLines();
-            if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+            if(g_myAdvisorEnabled && !IsAdvisorTradeTaken(sym, g_currentSignalID))
             {
                CheckAndAutoTradeAdvice();
             }
@@ -12404,7 +12263,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             UpdateTradeAdviceLines();
             SaveActiveSignalSnapshot(sym);
 
-            if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+            if(g_myAdvisorEnabled && !IsAdvisorTradeTaken(sym, g_currentSignalID))
             {
                CheckAndAutoTradeAdvice();
             }
@@ -12631,7 +12490,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             UpdateTradeAdviceLines();
             SaveActiveSignalSnapshot(sym);
 
-            if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+            if(g_myAdvisorEnabled && !IsAdvisorTradeTaken(sym, g_currentSignalID))
             {
                CheckAndAutoTradeAdvice();
             }
@@ -13729,14 +13588,6 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       return;
    }
 
-   if(CountOpenAdvisorTradesForSymbol(sym) > 0)
-   {
-      string msg = "[Trade Advisor] EXECUTION BLOCKED: An active advisor position is already running on " + sym;
-      Print(msg);
-      if(!isAutoTrade) Alert(msg);
-      return;
-   }
-
    // 3. Instrument Tradability Verification
    string tradableReason = "";
    if(!IsBrokerSymbolTradeable(sym, tradableReason))
@@ -13865,7 +13716,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
 
    // 8. Set-Capacity Rule: Advisor may open at most 2 sets of trades for a single instrument simultaneously
    int openSetsOnSym = CountOpenAdvisorSetsForSymbol(sym);
-   if(openSetsOnSym >= InpMaxSetsPerSymbol)
+   if(openSetsOnSym >= MathMax(1, MathMin(2, InpMaxSetsPerSymbol)))
    {
       PrintFormat("[Trade Advisor] EXECUTION BLOCKED: Maximum %d sets of trades already active for %s. Limit reached.",
                   InpMaxSetsPerSymbol, sym);
@@ -13897,6 +13748,16 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       return;
    }
 
+   // Recheck capacity and signal identity while holding the account execution lock.
+   if(CountOpenAdvisorSetsForSymbol(sym) >= MathMax(1, MathMin(2, InpMaxSetsPerSymbol)) ||
+      IsAdvisorTradeTaken(sym, g_currentSignalID) ||
+      (CountOpenAdvisorTradesForSymbol(sym) > 0 &&
+       AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING))
+   {
+      ReleaseAccountLock("ADVISOR_EXEC");
+      return;
+   }
+
    int currentOpenTrades = CountTotalOpenAdvisorTrades();
    int availableSlots = portfolioCeiling - currentOpenTrades;
    if(availableSlots <= 0)
@@ -13918,13 +13779,13 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
 
    if(availableSlots >= 4)
    {
-      allocCount = MathMin(InpAdvisorMaxTradesPerSetup, 4);
+      allocCount = MathMax(1, MathMin(InpAdvisorMaxTradesPerSetup, 4));
       for(int k = 0; k < allocCount; k++) targetLegNumbers[k] = k + 1;
       legsToExecute = allocCount;
    }
    else if(availableSlots == 3)
    {
-      allocCount = MathMin(InpAdvisorMaxTradesPerSetup, 3);
+      allocCount = MathMax(1, MathMin(InpAdvisorMaxTradesPerSetup, 3));
       for(int k = 0; k < allocCount; k++) targetLegNumbers[k] = k + 1;
       legsToExecute = allocCount;
    }
@@ -14317,7 +14178,7 @@ void CheckAndAutoTradeAdvice()
    }
 
    // 4. Must have an unexecuted viable setup
-   if(CountOpenAdvisorTradesForSymbol(_Symbol) > 0)
+   if((CountOpenAdvisorSetsForSymbol(_Symbol) >= MathMax(1, MathMin(2, InpMaxSetsPerSymbol)) || IsAdvisorTradeTaken(_Symbol, g_currentSignalID)))
    {
       g_currentTradeTaken = true;
       return;
@@ -14478,7 +14339,7 @@ void CheckAndAutoTradeAdvice()
    }
 
    // 5. Anti-Repeat Protection: Ensure no active trade is running for this symbol
-   if(CountOpenAdvisorTradesForSymbol(_Symbol) > 0)
+   if((CountOpenAdvisorSetsForSymbol(_Symbol) >= MathMax(1, MathMin(2, InpMaxSetsPerSymbol)) || IsAdvisorTradeTaken(_Symbol, g_currentSignalID)))
    {
       g_currentTradeTaken = true;
       return;
@@ -14500,7 +14361,7 @@ void CheckAndAutoTradeAdvice()
       double state = GlobalVariableGet(sigExecKey);
       if(state >= 2.0)
       {
-         if(CountOpenAdvisorTradesForSymbol(_Symbol) > 0)
+         if((CountOpenAdvisorSetsForSymbol(_Symbol) >= MathMax(1, MathMin(2, InpMaxSetsPerSymbol)) || IsAdvisorTradeTaken(_Symbol, g_currentSignalID)))
          {
             g_currentTradeTaken = true;
             return;
