@@ -2,11 +2,15 @@
 from pathlib import Path
 import json,re,subprocess,tempfile,hashlib
 root=Path(__file__).resolve().parents[1]
-s=(root/'SEGS_Trade_Manager_Pro_v3.74.mq5').read_text()
+s=(root/'SEGS_Trade_Manager_Pro_v3.75.mq5').read_text()
 assert all(p.read_text()==s for p in root.rglob('*.mq5'))
 ts=(root/'src/data/mql5Code.ts').read_text()
 assert json.loads(ts.split(' = ',1)[1].split(';\nexport default',1)[0])==s
 assert s.count('allowAutoTrade=false')==1
+# Regression: removed GBPUSD branch must not leave either undeclared reference.
+assert not re.search(r'\bisGBPUSD\b', s)
+assert 'bestTP2 = 1.33200' not in s and 'bestTP3 = 1.33690' not in s
+assert 'if(InpAutoMapTP3ToOpposingLiquidity)' in s
 assert 'void RunAdvisorStrategyEngine(bool forceScan, bool allowAutoTrade)\n{' in s
 assert not re.search(r'if\([^\n]*GetSafestStructuralStopLoss',s)
 a=s.index('bool SEGSSelectActiveOrderBlock(')
