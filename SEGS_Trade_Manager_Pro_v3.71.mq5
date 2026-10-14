@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.74.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.75.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.74 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.75 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.74"
+#property version   "3.75"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -996,7 +996,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.74 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.75 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1083,7 +1083,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.74 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.75 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -7155,35 +7155,25 @@ int BuildStructuralTargets(string sym, string dir, double entryPrice, double sto
    // Tier 4: Leg 4 (TP4) - Macro Expansion Runner (2.50x - 3.50x Daily ATR, ~4.50R - 7.50R)
    double bestTP1 = 0.0, bestTP2 = 0.0, bestTP3 = 0.0, bestTP4 = 0.0;
 
-   // Direct GBPUSD calibration match
-   if(isGBPUSD && isBuy && entryPrice >= 1.32000 && entryPrice <= 1.32800)
+   // Select targets from current structural candidates for every symbol.
+   for(int i = 0; i < candCount; i++)
    {
-      bestTP1 = entryPrice + MathMax(1.35 * riskDist, 25.0 * pipSize);
-      bestTP2 = 1.33200; // Exactly 1.33200 as specified
-      bestTP3 = 1.33690; // Exactly 1.33690 as specified
-      bestTP4 = 1.34200;
-   }
-   else
-   {
-      for(int i = 0; i < candCount; i++)
-      {
-         double lvl = candLevels[i];
-         double rDist = MathAbs(lvl - entryPrice) / riskDist;
-         double dDist = MathAbs(lvl - entryPrice) / dailyAtr;
+      double lvl = candLevels[i];
+      double rDist = MathAbs(lvl - entryPrice) / riskDist;
+      double dDist = MathAbs(lvl - entryPrice) / dailyAtr;
 
-         // Tier 1: Intraday obstacle
-         if((rDist >= 1.20 && rDist <= 1.70) && bestTP1 == 0.0)
-            bestTP1 = lvl;
-         // Tier 2: 1-2 Day attainable intermediate swing pivot (proper separation ~2.25R - 2.40R)
-         else if(((rDist >= 2.05 && rDist <= 2.60) || (dDist >= 0.75 && dDist <= 1.25)) && bestTP2 == 0.0)
-            bestTP2 = lvl;
-         // Tier 3: 2-3 Day attainable major structural barrier (tighter & smaller)
-         else if(((rDist >= 3.20 && rDist <= 4.20) || (dDist >= 1.45 && dDist <= 2.25)) && bestTP3 == 0.0)
-            bestTP3 = lvl;
-         // Tier 4: Macro expansion runner
-         else if((rDist >= 5.00 && rDist <= 8.50) && bestTP4 == 0.0)
-            bestTP4 = lvl;
-      }
+      // Tier 1: Intraday obstacle
+      if((rDist >= 1.20 && rDist <= 1.70) && bestTP1 == 0.0)
+         bestTP1 = lvl;
+      // Tier 2: 1-2 Day attainable intermediate swing pivot (proper separation ~2.25R - 2.40R)
+      else if(((rDist >= 2.05 && rDist <= 2.60) || (dDist >= 0.75 && dDist <= 1.25)) && bestTP2 == 0.0)
+         bestTP2 = lvl;
+      // Tier 3: 2-3 Day attainable major structural barrier (tighter & smaller)
+      else if(((rDist >= 3.20 && rDist <= 4.20) || (dDist >= 1.45 && dDist <= 2.25)) && bestTP3 == 0.0)
+         bestTP3 = lvl;
+      // Tier 4: Macro expansion runner
+      else if((rDist >= 5.00 && rDist <= 8.50) && bestTP4 == 0.0)
+         bestTP4 = lvl;
    }
 
    // Fallback defaults if no specific candidate landed in window
@@ -7197,7 +7187,7 @@ int BuildStructuralTargets(string sym, string dir, double entryPrice, double sto
       bestTP4 = entryPrice + (isBuy ? 1.0 : -1.0) * MathMax(6.00 * riskDist, 2.80 * dailyAtr);
 
    // Optional direct mapping of Leg 3 (TP3) to opposing PDH / PDL ONLY if within 2-3 day attainable distance!
-   if(InpAutoMapTP3ToOpposingLiquidity && !isGBPUSD)
+   if(InpAutoMapTP3ToOpposingLiquidity)
    {
       double max3DayReach = 2.25 * dailyAtr;
       if(isBuy)
@@ -16714,7 +16704,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.74", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.75", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {
