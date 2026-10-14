@@ -2,7 +2,7 @@
 from pathlib import Path
 import json,re,subprocess,tempfile,hashlib
 root=Path(__file__).resolve().parents[1]
-s=(root/'SEGS_Trade_Manager_Pro_v3.75.mq5').read_text()
+s=(root/'SEGS_Trade_Manager_Pro_v3.78.mq5').read_text()
 assert all(p.read_text()==s for p in root.rglob('*.mq5'))
 ts=(root/'src/data/mql5Code.ts').read_text()
 assert json.loads(ts.split(' = ',1)[1].split(';\nexport default',1)[0])==s
