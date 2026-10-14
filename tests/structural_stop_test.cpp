@@ -71,6 +71,7 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
    bool buy = (dir == "BUY");
    double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
    double tick = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+   if(!MathIsValidNumber(pt) || pt <= 0.0 || !MathIsValidNumber(tick) || tick <= 0.0) return 0.0;
    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
    double atr = MathIsValidNumber(curAtr) ? MathMax(0.0, curAtr) : 0.0;
    double buffer = MathMax(MathMax(0.0, InpStructuralBufferATR) * atr, 3.0 * tick);
@@ -83,11 +84,13 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
    for(int d = 1; d <= 5; d++)
       SEGSAddStopAnchor(buy ? iLow(sym, PERIOD_D1, d) : iHigh(sym, PERIOD_D1, d),
                         buy, entryPrice, boundary, proximity, extreme, nearby);
-   for(int h = 2; h <= 24; h++)
+   for(int h = 1; h <= 24; h++)
    {
       double v = buy ? iLow(sym, PERIOD_H4, h) : iHigh(sym, PERIOD_H4, h);
       double left = buy ? iLow(sym, PERIOD_H4, h+1) : iHigh(sym, PERIOD_H4, h+1);
-      double right = buy ? iLow(sym, PERIOD_H4, h-1) : iHigh(sym, PERIOD_H4, h-1);
+      // Bar 1 uses only completed neighbors, never the forming H4 bar.
+      int neighbor = h == 1 ? 3 : h-1;
+      double right = buy ? iLow(sym, PERIOD_H4, neighbor) : iHigh(sym, PERIOD_H4, neighbor);
       if(left > 0.0 && right > 0.0 && (buy ? (v <= left && v <= right) : (v >= left && v >= right)))
          SEGSAddStopAnchor(v, buy, entryPrice, boundary, proximity, extreme, nearby);
    }
@@ -100,7 +103,8 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
       SEGSAddStopAnchor(buy ? g_recentSupport : g_recentResistance, buy, entryPrice, boundary, proximity, extreme, nearby);
    }
    ENUM_SEGS_SL_STYLE style = g_systemStopStyle;
-   if(preferMultiDay && style == SL_STYLE_AUTO_DUAL) style = SL_STYLE_MULTI_DAY;
+   // A caller's swing preference must never discard the entered OB boundary.
+   if(preferMultiDay && !validOB && style == SL_STYLE_AUTO_DUAL) style = SL_STYLE_MULTI_DAY;
    double anchor = 0.0;
    if(style == SL_STYLE_ACTIVE_ORDER_BLOCK)
    {
@@ -110,20 +114,30 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
       buffer = MathMax(g_systemOBBufferATR * atr, g_systemOBBufferTicks * tick);
    }
    else if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
-   else if(style == SL_STYLE_MULTI_DAY) anchor = extreme;
+   else if(style == SL_STYLE_MULTI_DAY)
+   {
+      anchor = extreme;
+      // Even explicit swing mode must invalidate the entered zone, not sit inside it.
+      if(validOB) anchor = anchor > 0.0 ? (buy ? MathMin(anchor, boundary) : MathMax(anchor, boundary)) : boundary;
+   }
    else anchor = validOB ? (nearby > 0.0 ? nearby : boundary) : extreme;
    // No fabricated structural stop: caller must defer when the required anchor is absent.
    if(anchor <= 0.0) return 0.0;
    double stop = buy ? anchor - buffer : anchor + buffer;
    MqlTick quote;
-   if(!SymbolInfoTick(sym, quote)) return 0.0;
+   if(!SymbolInfoTick(sym, quote) || !MathIsValidNumber(quote.bid) ||
+      !MathIsValidNumber(quote.ask) || quote.bid <= 0.0 || quote.ask < quote.bid) return 0.0;
    double distance = MathMax((double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * pt, tick) + 2.0 * tick;
    if(buy) stop = MathMin(stop, MathMin(entryPrice, quote.bid) - distance);
    else stop = MathMax(stop, MathMax(entryPrice, quote.ask) + distance);
    // Round away from invalidation, never towards the OB or broker boundary.
    stop = (buy ? MathFloor(stop / tick) : MathCeil(stop / tick)) * tick;
-   return stop > 0.0 ? NormalizeDouble(stop, digits) : 0.0;
+   stop = NormalizeDouble(stop, digits);
+   if(!MathIsValidNumber(stop) || stop <= 0.0) return 0.0;
+   if(validOB && style != SL_STYLE_ACTIVE_ORDER_BLOCK && (buy ? stop >= boundary : stop <= boundary)) return 0.0;
+   return stop;
 }
+
 
 int main(){
  lows[0][1]=98.8;lows[0][2]=90;highs[0][1]=101.2;highs[0][2]=110;
@@ -165,5 +179,19 @@ int main(){
  v=GetSafestStructuralStopLoss("TEST","SELL",bid,0,0,.0006);
  assert(std::abs(v-1.32654)<1e-9);
  ready=false;assert(GetSafestStructuralStopLoss("TEST","SELL",bid,0,0,.0006)==0);ready=true;
- std::cout<<"18 structural-stop assertions passed\n";
+ // Caller preference cannot move a BUY stop inside an entered demand block.
+ g_systemStopStyle=SL_STYLE_AUTO_DUAL;
+ point=.01;tick=.01;digits=2;bid=100;ask=100.02;stops=0;
+ lows[0][1]=99.5;lows[0][2]=0;highs[0][1]=100.5;highs[0][2]=0;
+ assert(std::abs(GetSafestStructuralStopLoss("TEST","BUY",100,99,99.7,1,true)-98.8)<1e-8);
+ assert(std::abs(GetSafestStructuralStopLoss("TEST","SELL",100,100.3,101,1,true)-101.2)<1e-8);
+ g_systemStopStyle=SL_STYLE_MULTI_DAY;
+ assert(GetSafestStructuralStopLoss("TEST","BUY",100,99,99.7,1)<99);
+ assert(GetSafestStructuralStopLoss("TEST","SELL",100,100.3,101,1)>101);
+ g_systemStopStyle=SL_STYLE_AUTO_DUAL;
+ lows[1][1]=98.7;lows[1][2]=99.2;lows[1][3]=99.3;
+ assert(std::abs(GetSafestStructuralStopLoss("TEST","BUY",100,99,99.7,1)-98.5)<1e-8);
+ highs[1][1]=101.3;highs[1][2]=100.8;highs[1][3]=100.7;
+ assert(std::abs(GetSafestStructuralStopLoss("TEST","SELL",100,100.3,101,1)-101.5)<1e-8);
+ std::cout<<"24 structural-stop assertions passed\n";
 }

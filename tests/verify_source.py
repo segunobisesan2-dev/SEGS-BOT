@@ -2,7 +2,7 @@
 from pathlib import Path
 import json,re,subprocess,tempfile,hashlib
 root=Path(__file__).resolve().parents[1]
-s=(root/'SEGS_Trade_Manager_Pro_v3.73.mq5').read_text()
+s=(root/'SEGS_Trade_Manager_Pro_v3.74.mq5').read_text()
 assert all(p.read_text()==s for p in root.rglob('*.mq5'))
 ts=(root/'src/data/mql5Code.ts').read_text()
 assert json.loads(ts.split(' = ',1)[1].split(';\nexport default',1)[0])==s
@@ -15,6 +15,13 @@ assert s[a:b] in (root/'tests/structural_stop_test.cpp').read_text(), 'Harness m
 a_reset=s.index('bool SEGSResetExpiredSetup(string sym)\n{');b_reset=s.index('\nvoid CancelUnviablePlannedEntry',a_reset)
 assert s[a_reset:b_reset] in (root/'tests/expired_signal_test.cpp').read_text()
 assert 'SERIES_SYNCHRONIZED' in s and 'BarsCalculated(handles[h])' in s
+init=s[s.index('int OnInit()'):s.index('void ReleaseIndicatorHandles()')]
+assert 'RunAdvisorStrategyEngine(' not in init and 'return(INIT_SUCCEEDED)' in init
+assert 'CopyRates(_Symbol, frames[i], 0, minimums[i], bootstrap)' in s
+assert 'input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_AUTO_DUAL;' in s
+assert 'if(!MathIsValidNumber(pipSize) || pipSize <= 0.0) return tp;' in s
+assert s.count('!MathIsValidNumber(tickVal) || tickVal <= 0.0) return 0.0;') >= 2
+assert 'SEGS_DASH_VIS_' in s and 'SEGS_SYNC_SYS' in s
 clean=re.sub(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'','',s)
 stack=[]
 for c in clean:

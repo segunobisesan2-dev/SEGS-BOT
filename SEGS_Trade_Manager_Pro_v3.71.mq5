@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.73.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.74.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.73 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.74 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.73"
+#property version   "3.74"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -906,20 +906,20 @@ enum ENUM_SEGS_SL_STYLE
    SL_STYLE_ACTIVE_ORDER_BLOCK = 3
 };
 input group "=== System Structural Stop Loss ==="
-input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_ACTIVE_ORDER_BLOCK;
+input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_AUTO_DUAL;
 input bool InpPublishStopSettingsToAllCharts = false; // Set true on one chart to publish these inputs
 input double InpActiveOBBufferATR = 0.05; // Small buffer beyond active OB floor/ceiling
 input int InpActiveOBBufferTicks = 3;
 input double InpActiveOBMaxDistanceATR = 3.0;
 input bool InpTrailActiveOrderBlock = true; // Tighten existing advisor positions only
-ENUM_SEGS_SL_STYLE g_systemStopStyle = SL_STYLE_ACTIVE_ORDER_BLOCK;
+ENUM_SEGS_SL_STYLE g_systemStopStyle = SL_STYLE_AUTO_DUAL;
 double g_systemOBBufferATR = 0.05, g_systemOBMaxDistanceATR = 3.0;
 int g_systemOBBufferTicks = 3;
 bool g_systemTrailOB = true;
 
 string SEGSStopKey(string field)
 {
-   return "SEGS_SL_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + field;
+   return "SEGS_SL_V2_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + field;
 }
 
 void SEGSSyncStopSettings(bool publish=false)
@@ -951,7 +951,8 @@ bool SEGSMarketReady(string sym)
    double tick = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
    return MathIsValidNumber(point) && point > 0.0 &&
           MathIsValidNumber(tick) && tick > 0.0 &&
-          SymbolInfoTick(sym, quote) && quote.bid > 0.0 && quote.ask >= quote.bid;
+          SymbolInfoTick(sym, quote) && MathIsValidNumber(quote.bid) && MathIsValidNumber(quote.ask) &&
+          quote.bid > 0.0 && quote.ask >= quote.bid;
 }
 
 bool SEGSEnsureRuntimeReady()
@@ -967,7 +968,10 @@ bool SEGSEnsureRuntimeReady()
    int minimums[] = {45, 25, 25, 60, 60, 60, 30, 6, 2};
    for(int i = 0; i < ArraySize(frames); i++)
    {
-      if(!SeriesInfoInteger(_Symbol, frames[i], SERIES_SYNCHRONIZED) || iBars(_Symbol, frames[i]) < minimums[i])
+      // CopyRates explicitly requests missing history without blocking attachment.
+      MqlRates bootstrap[];
+      int copied = CopyRates(_Symbol, frames[i], 0, minimums[i], bootstrap);
+      if(copied < minimums[i] || !SeriesInfoInteger(_Symbol, frames[i], SERIES_SYNCHRONIZED) || iBars(_Symbol, frames[i]) < minimums[i])
       {
          Comment("SEGS: waiting for synchronized chart history; EA remains attached.");
          return false;
@@ -992,7 +996,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.73 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.74 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1079,7 +1083,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.73 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.74 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -1190,7 +1194,7 @@ void ResetMarketQualityState(string newSym)
 
 void OnDeinit(const int reason)
 {
-   PrintFormat("[SEGS DEINIT] reason=%d, lastError=%d, symbol=%s, chart=%I64d", reason, GetLastError(), _Symbol, ChartID());
+   PrintFormat("[SEGS DEINIT] reason=%d, lastError=%d, symbol=%s, chart=%I64d, phase=%.0f", reason, GetLastError(), _Symbol, ChartID(), GlobalVariableGet("SEGS_PHASE_" + IntegerToString(ChartID())));
    g_runtimeReady = false;
    GlobalVariableDel("SEGS_HB_" + IntegerToString(ChartID()));
    EventKillTimer();
@@ -7616,6 +7620,7 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
    bool buy = (dir == "BUY");
    double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
    double tick = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+   if(!MathIsValidNumber(pt) || pt <= 0.0 || !MathIsValidNumber(tick) || tick <= 0.0) return 0.0;
    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
    double atr = MathIsValidNumber(curAtr) ? MathMax(0.0, curAtr) : 0.0;
    double buffer = MathMax(MathMax(0.0, InpStructuralBufferATR) * atr, 3.0 * tick);
@@ -7628,11 +7633,13 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
    for(int d = 1; d <= 5; d++)
       SEGSAddStopAnchor(buy ? iLow(sym, PERIOD_D1, d) : iHigh(sym, PERIOD_D1, d),
                         buy, entryPrice, boundary, proximity, extreme, nearby);
-   for(int h = 2; h <= 24; h++)
+   for(int h = 1; h <= 24; h++)
    {
       double v = buy ? iLow(sym, PERIOD_H4, h) : iHigh(sym, PERIOD_H4, h);
       double left = buy ? iLow(sym, PERIOD_H4, h+1) : iHigh(sym, PERIOD_H4, h+1);
-      double right = buy ? iLow(sym, PERIOD_H4, h-1) : iHigh(sym, PERIOD_H4, h-1);
+      // Bar 1 uses only completed neighbors, never the forming H4 bar.
+      int neighbor = h == 1 ? 3 : h-1;
+      double right = buy ? iLow(sym, PERIOD_H4, neighbor) : iHigh(sym, PERIOD_H4, neighbor);
       if(left > 0.0 && right > 0.0 && (buy ? (v <= left && v <= right) : (v >= left && v >= right)))
          SEGSAddStopAnchor(v, buy, entryPrice, boundary, proximity, extreme, nearby);
    }
@@ -7645,7 +7652,8 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
       SEGSAddStopAnchor(buy ? g_recentSupport : g_recentResistance, buy, entryPrice, boundary, proximity, extreme, nearby);
    }
    ENUM_SEGS_SL_STYLE style = g_systemStopStyle;
-   if(preferMultiDay && style == SL_STYLE_AUTO_DUAL) style = SL_STYLE_MULTI_DAY;
+   // A caller's swing preference must never discard the entered OB boundary.
+   if(preferMultiDay && !validOB && style == SL_STYLE_AUTO_DUAL) style = SL_STYLE_MULTI_DAY;
    double anchor = 0.0;
    if(style == SL_STYLE_ACTIVE_ORDER_BLOCK)
    {
@@ -7655,19 +7663,28 @@ double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, do
       buffer = MathMax(g_systemOBBufferATR * atr, g_systemOBBufferTicks * tick);
    }
    else if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
-   else if(style == SL_STYLE_MULTI_DAY) anchor = extreme;
+   else if(style == SL_STYLE_MULTI_DAY)
+   {
+      anchor = extreme;
+      // Even explicit swing mode must invalidate the entered zone, not sit inside it.
+      if(validOB) anchor = anchor > 0.0 ? (buy ? MathMin(anchor, boundary) : MathMax(anchor, boundary)) : boundary;
+   }
    else anchor = validOB ? (nearby > 0.0 ? nearby : boundary) : extreme;
    // No fabricated structural stop: caller must defer when the required anchor is absent.
    if(anchor <= 0.0) return 0.0;
    double stop = buy ? anchor - buffer : anchor + buffer;
    MqlTick quote;
-   if(!SymbolInfoTick(sym, quote)) return 0.0;
+   if(!SymbolInfoTick(sym, quote) || !MathIsValidNumber(quote.bid) ||
+      !MathIsValidNumber(quote.ask) || quote.bid <= 0.0 || quote.ask < quote.bid) return 0.0;
    double distance = MathMax((double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * pt, tick) + 2.0 * tick;
    if(buy) stop = MathMin(stop, MathMin(entryPrice, quote.bid) - distance);
    else stop = MathMax(stop, MathMax(entryPrice, quote.ask) + distance);
    // Round away from invalidation, never towards the OB or broker boundary.
    stop = (buy ? MathFloor(stop / tick) : MathCeil(stop / tick)) * tick;
-   return stop > 0.0 ? NormalizeDouble(stop, digits) : 0.0;
+   stop = NormalizeDouble(stop, digits);
+   if(!MathIsValidNumber(stop) || stop <= 0.0) return 0.0;
+   if(validOB && style != SL_STYLE_ACTIVE_ORDER_BLOCK && (buy ? stop >= boundary : stop <= boundary)) return 0.0;
+   return stop;
 }
 
 //+------------------------------------------------------------------+
@@ -16697,7 +16714,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.73", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.74", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {

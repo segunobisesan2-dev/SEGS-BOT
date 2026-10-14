@@ -1,18 +1,20 @@
-# SEGS-BOT — full EA v3.73
+# SEGS-BOT — full EA v3.74
 
-[Download the full MT5 source](https://raw.githubusercontent.com/segunobisesan2-dev/SEGS-BOT/main/SEGS_Trade_Manager_Pro_v3.73.mq5)
+[Download the full MT5 source](https://raw.githubusercontent.com/segunobisesan2-dev/SEGS-BOT/main/SEGS_Trade_Manager_Pro_v3.74.mq5)
 
-Download all files using **Code → Download ZIP**. Install the v3.73 source, compile with F7 in MetaEditor, then validate on demo. No native MT5 compiler or runtime was available in this environment; successful native compilation and permanent resolution of detachment are not claimed.
+Download all files using **Code → Download ZIP**. Install the v3.74 source, compile with F7 in MetaEditor, then validate on demo. No native MT5 compiler or runtime was available in this environment; successful native compilation and permanent resolution of detachment are not claimed.
 
 ## Stop calibration requested from the chart
 
-Default: `SL_STYLE_ACTIVE_ORDER_BLOCK`. Select the nearest non-invalidated, same-direction M30/H1 order block whose floor is below the BUY market or ceiling above the SELL market, within the configured ATR distance. BUY SL is below the active demand floor; SELL SL is above the active supply ceiling. No absolute GBPUSD/XAUUSD price is embedded.
+Default: `SL_STYLE_AUTO_DUAL`. BUY stops invalidate the entered demand block below its floor; SELL stops invalidate the entered supply block above its ceiling. When a D1/H4 pivot, previous day/week level, or structural support/resistance lies just beyond that boundary within `InpDualProximityATR`, dual mode anchors beyond that level instead. The default structural buffer is max(0.20 × H1 ATR, 3 trade ticks). Broker distance and outward tick rounding may move the stop farther away.
 
-The default buffer is max(0.05 × H1 ATR, 3 trade ticks). Broker minimum stop distance can require a larger separation. `InpActiveOBMaxDistanceATR` defaults to 3.0. Missing active zones defer entries; existing protection is retained.
+Caller swing preferences cannot discard a valid entered block. Explicit multi-day mode also keeps stops outside the entered zone. With no entered block, dual mode uses available multi-day structure. Missing anchors defer execution. No absolute instrument price is embedded.
+
+`SL_STYLE_ACTIVE_ORDER_BLOCK` remains an optional mode for nearest active M30/H1 zone calibration and trailing, with its own buffer settings. It is not the default. Existing protected positions retain their broker stops; dual selection applies to new entries and does not retroactively widen existing stops.
 
 ### System setting across charts
 
-On **one chart**, set `InpPublishStopSettingsToAllCharts=true` and select the stop style, buffer, maximum distance, and `InpTrailActiveOrderBlock` preference in Inputs. This publishes the policy to account-scoped terminal global variables. All charts load that policy on the next ready event, normally within one second. Keep `InpPublishStopSettingsToAllCharts=false` on other charts, so they consume the same policy. Initial attachment creates the default policy if absent. The policy persists across terminal restart. It applies within this terminal/account.
+On **one chart**, set `InpPublishStopSettingsToAllCharts=true` and select the stop style, buffer, maximum distance, and `InpTrailActiveOrderBlock` preference in Inputs. This publishes the policy to account-scoped terminal global variables. All charts load that policy on the next ready event, normally within one second. Keep `InpPublishStopSettingsToAllCharts=false` on other charts, so they consume the same policy. v3.74 uses the new `SEGS_SL_V2_<account>_*` namespace, initialized from Inputs once, so an older stored active-zone default cannot silently override the new dual default. Republish custom settings from one chart after upgrading all charts. The policy persists across terminal restart. It applies within this terminal/account.
 
 `InpTrailActiveOrderBlock=true` tightens existing advisor-position stops to the active zone. It never widens an existing stop. A profitable BUY stop may be above the original entry; a profitable SELL stop may be below it. Existing manual positions are not included in this new trailing runner. Normal existing manual-management behavior is retained.
 
@@ -32,19 +34,25 @@ The actual reported detachment has not been reproduced, and no Experts/Journal e
 
 ## Verification performed
 
-18 assertions against the extracted current structural-stop functions compiled using g++ with `-std=c++17 -Wall -Wextra -Werror`, using stubbed MT5 APIs. Includes active demand/supply, invalidated zones, missing nearby active zones, zero metadata, tick rounding, broker distance, original dual modes, and a profitable stop above original BUY entry. This is **not native MQL5 compilation**.
+24 assertions against the extracted current structural-stop functions compiled using g++ with `-std=c++17 -Wall -Wextra -Werror`, using stubbed MT5 APIs. Includes active demand/supply, invalidated zones, missing nearby active zones, zero metadata, tick rounding, broker distance, original dual modes, and a profitable stop above original BUY entry. This is **not native MQL5 compilation**.
 
-Seven corrected stop-guard statements retain their regression harness. Source default-parameter and lexical-integrity checks pass. All eight `.mq5` copies and the decoded TypeScript string are identical. Versioned 3.50/3.71 filenames are compatibility copies of 3.73, not old implementations.
+Seven corrected stop-guard statements retain their regression harness. Source default-parameter and lexical-integrity checks pass. All ten `.mq5` copies and the decoded TypeScript string are identical. Versioned 3.50/3.71 filenames are compatibility copies of 3.74, not old implementations.
 
 ## Required MT5 validation
 
-1. Remove the older EA instance from the chart, replace its source with v3.73, and compile with F7. Verify the file attached is the newly compiled v3.73 executable.
+1. Remove the older EA instance from the chart, replace its source with v3.74, and compile with F7. Verify the file attached is the newly compiled v3.74 executable.
 2. On demo, first disable Algo Trading and attach to GBPUSD, XAUUSD, AUDUSD, USDJPY and a chart still loading history. Wait for readiness and test timeframe changes/restart.
 3. Publish the system stop settings from one chart. Check active zones and both BUY/SELL protection. Enable demo Algo Trading to exercise trailing modifications.
 4. If detachment remains, provide the Experts and Journal entries at the failure time, including any fatal error, `[SEGS DEINIT]`, and `SEGS_PHASE_<ChartID>` value (F3 terminal global variables).
 
-## Expired-signal recovery (v3.73)
+## Expired-signal recovery (v3.74)
 
 Expired, cancelled, and invalidated pending setups reset to SCANNING when no advisor positions remain. Clears stale flag, signal identity, entry/SL/TP, old cancellation coordinates, cached scan time and active snapshot. Recovery forces a fresh scan; a newly expired candidate gets one immediate retry per engine cycle. Existing positions and executed-signal deduplication records are preserved. Automatic execution remains subject to viable setup, market gates, permissions, and configured limits. Native MT5 verification remains required.
 
 Expiry regression assertions verify clearing stale state, immediate scan eligibility, repeat-reset idempotency and preservation of actual open positions using the extracted reset function.
+
+## v3.74 validation limits
+
+Regression checks include six new cases covering caller preference, both entry-zone boundaries in multi-day mode, and completed H4 bar-1 pivot selection. Startup source assertions check deferred execution, success return, explicit history requests, monetary tick guards, pip guards and visibility synchronization. C++ tests execute extracted stop functions with stubbed broker APIs; lexical/source checks do not establish native MQL5 compilation. There is no TypeScript project or compiler in this workspace, so TypeScript verification checks the decoded source string only.
+
+Trade calls are deliberately deferred until readiness; this is a lifecycle safeguard, not a claim that MQL5 universally prohibits all trade calls from OnInit. Actual permanent detachment resolution requires MT5 Experts/Journal evidence and native demo validation.
