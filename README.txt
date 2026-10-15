@@ -1,3 +1,7 @@
+# Current release: SEGS.mq5 (v3.80)
+
+Use the short filename `SEGS.mq5`. See [REPAIR-v3.80.md](REPAIR-v3.80.md) for independent second setups, the bounded wick-first / institutional fallback stop policy, system settings and validation limits. Older filenames are compatibility copies. Earlier notes below are superseded where they differ.
+
 # Current release: v3.79
 
 Use `SEGS_Trade_Manager_Pro_v3.79.mq5`. See [REPAIR-v3.79.md](REPAIR-v3.79.md) for system entry gates, confirmed reversals, cross-symbol target isolation, screenshot analysis and validation limits. Older versioned sources are compatibility copies. Earlier notes below are superseded by this report where they differ.

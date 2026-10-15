@@ -33,9 +33,10 @@ using string=std::string;using datetime=long;using ENUM_TIMEFRAMES=int;using ENU
 const int PERIOD_M5=5,PERIOD_M15=15,PERIOD_M30=30,PERIOD_H1=60,PERIOD_H2=120,PERIOD_H4=240;
 const int INVALID_HANDLE=-1,SYMBOL_BID=1,SYMBOL_ASK=2,SYMBOL_TRADE_TICK_SIZE=3,ACCOUNT_LOGIN=4;
 struct MqlRates{datetime time=0;double open=0,high=0,low=0,close=0;};
-struct M30OrderBlock{bool bullish=false;double high=0,low=0;datetime originTime=0,confirmTime=0;bool invalidated=false;};
+struct M30OrderBlock{bool bullish=false;double high=0,low=0;datetime originTime=0,confirmTime=0;bool invalidated=false;double wickLow=low,wickHigh=high;};
 std::vector<M30OrderBlock> g_orderBlocks,g_h1OrderBlocks;
 std::map<int,std::vector<MqlRates>> bars;
+double g_executionZoneLow=0,g_executionZoneHigh=0;string g_currentSignalID="test";
 string _Symbol="NDAQ",g_h1Bias,g_h2Bias,g_h4Bias,g_overallBias,g_activeEntryStrategy="ORDER_BLOCK";
 double g_recentSupport=0,g_recentResistance=0;
 int g_hAtr_H1=0,g_hEma20_H1=1,g_hEma50_H1=2,g_hEma20_H2=3,g_hEma50_H2=4,g_hEma20_H4=5,g_hEma50_H4=6;
@@ -43,6 +44,7 @@ int InpReversalH1MinBounces=3,InpReversalM30MinBounces=4;
 bool fresh=true,bull=false;double bid=100,ask=100.01,atr=10,scale=1;long account=1;
 std::map<string,double> globals;
 bool SEGSQuoteFresh(string){return fresh;}
+bool SEGSFreshConfirmationAfterOtherSet(string,string){return true;}
 template<class T>int ArraySize(const std::vector<T>& a){return a.size();}
 template<class T>void ArraySetAsSeries(std::vector<T>&,bool){}
 int CopyRates(string,int tf,int start,int count,std::vector<MqlRates>& out){assert(start==1);out=bars[tf];if((int)out.size()>count)out.resize(count);return out.size();}

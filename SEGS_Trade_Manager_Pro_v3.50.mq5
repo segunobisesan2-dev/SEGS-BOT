@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.79.mq5 |
+//|                                SEGS.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.79 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.80 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.79"
+#property version   "3.80"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -450,6 +450,8 @@ struct M30OrderBlock
    bool       bullish;
    double     high;
    double     low;
+   double     wickLow;
+   double     wickHigh;
    datetime   originTime;
    datetime   confirmTime;
    int        touchCount;
@@ -906,9 +908,12 @@ enum ENUM_SEGS_SL_STYLE
    SL_STYLE_ACTIVE_ORDER_BLOCK = 3
 };
 input group "=== System Structural Stop Loss ==="
+input double InpStructuralBufferATR = 0.05; // System buffer beyond the entry candle wick
 input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_AUTO_DUAL;
+input double InpMaxStructuralStopATR = 1.5; // Maximum entry-to-stop distance in closed H1 ATR
+input double InpMaxStructuralStopPercent = 1.0; // Also cap at % of entry price; 0 disables this additional cap
 input bool InpPublishStopSettingsToAllCharts = false; // Set true on one chart to publish these inputs
-input double InpActiveOBBufferATR = 0.05; // Small buffer beyond active OB floor/ceiling
+input double InpActiveOBBufferATR = 0.05; // Legacy input; system buffer is InpStructuralBufferATR
 input int InpActiveOBBufferTicks = 3;
 input double InpActiveOBMaxDistanceATR = 3.0;
 input bool InpTrailActiveOrderBlock = true; // Tighten existing advisor positions only
@@ -916,10 +921,12 @@ ENUM_SEGS_SL_STYLE g_systemStopStyle = SL_STYLE_AUTO_DUAL;
 double g_systemOBBufferATR = 0.05, g_systemOBMaxDistanceATR = 3.0;
 int g_systemOBBufferTicks = 3;
 bool g_systemTrailOB = true;
+double g_systemMaxStopATR = 1.5, g_systemMaxStopPercent = 1.0;
+double g_executionZoneLow = 0.0, g_executionZoneHigh = 0.0;
 
 string SEGSStopKey(string field)
 {
-   return "SEGS_SL_V2_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + field;
+   return "SEGS_SL_V3_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + field;
 }
 
 void SEGSSyncStopSettings(bool publish=false)
@@ -927,19 +934,22 @@ void SEGSSyncStopSettings(bool publish=false)
    if(publish || !GlobalVariableCheck(SEGSStopKey("STYLE")))
    {
       GlobalVariableSet(SEGSStopKey("STYLE"), (double)InpStructuralStopStyle);
-      GlobalVariableSet(SEGSStopKey("BUFFER_ATR"), MathMax(0.0, MathMin(1.0, InpActiveOBBufferATR)));
+      GlobalVariableSet(SEGSStopKey("BUFFER_ATR"), MathMax(0.0, MathMin(1.0, InpStructuralBufferATR)));
       GlobalVariableSet(SEGSStopKey("BUFFER_TICKS"), (double)MathMax(1, MathMin(100, InpActiveOBBufferTicks)));
       GlobalVariableSet(SEGSStopKey("MAX_DISTANCE_ATR"), MathMax(0.1, MathMin(20.0, InpActiveOBMaxDistanceATR)));
       GlobalVariableSet(SEGSStopKey("TRAIL"), InpTrailActiveOrderBlock ? 1.0 : 0.0);
+      GlobalVariableSet(SEGSStopKey("MAX_STOP_ATR"), MathMax(0.1,MathMin(20.0,InpMaxStructuralStopATR)));
+      GlobalVariableSet(SEGSStopKey("MAX_STOP_PCT"), MathMax(0.0,MathMin(20.0,InpMaxStructuralStopPercent)));
    }
    g_systemStopStyle = (ENUM_SEGS_SL_STYLE)(int)MathMax(0, MathMin(3, GlobalVariableGet(SEGSStopKey("STYLE"))));
    g_systemOBBufferATR = MathMax(0.0, MathMin(1.0, GlobalVariableGet(SEGSStopKey("BUFFER_ATR"))));
    g_systemOBBufferTicks = (int)MathMax(1, MathMin(100, GlobalVariableGet(SEGSStopKey("BUFFER_TICKS"))));
    g_systemOBMaxDistanceATR = MathMax(0.1, MathMin(20.0, GlobalVariableGet(SEGSStopKey("MAX_DISTANCE_ATR"))));
    g_systemTrailOB = GlobalVariableGet(SEGSStopKey("TRAIL")) > 0.5;
+   g_systemMaxStopATR=MathMax(0.1,MathMin(20.0,GlobalVariableGet(SEGSStopKey("MAX_STOP_ATR"))));
+   g_systemMaxStopPercent=MathMax(0.0,MathMin(20.0,GlobalVariableGet(SEGSStopKey("MAX_STOP_PCT"))));
 }
 
-input double InpStructuralBufferATR = 0.20;
 input double InpDualProximityATR = 0.85;
 struct SEGSHistoryRecord
 {
@@ -1051,7 +1061,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.79 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.80 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1138,7 +1148,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.79 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.80 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -1313,13 +1323,6 @@ void SEGSCalibrateActiveZoneProtection()
             PrintFormat("[SEGS STRUCTURAL TRAIL] %s ticket=%I64u oldSL=%.8f newSL=%.8f", _Symbol, ticket, oldSL, stop);
       }
    }
-   string activeDir; double entry=0.0, stop=0.0, t1=0.0,t2=0.0,t3=0.0,t4=0.0; int count=0;
-   if(GetOpenAdvisorTradeDetails(_Symbol, activeDir, entry, stop, t1,t2,t3,t4,count))
-   {
-      g_staticSL = stop; // Actual broker stop, including profitable trailing stops above/below entry.
-      UpdateTradeAdviceLines();
-      return;
-   }
    string dir = g_currentAdvisedAction;
    if(dir != "BUY" && dir != "SELL") dir = g_plannedAction;
    if(dir != "BUY" && dir != "SELL") return;
@@ -1485,12 +1488,12 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
             string gvCdKey = "SEGS_COOLDOWN_" + cleanSym + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
              GlobalVariableSet(gvCdKey, (double)(TimeCurrent() + 15)); // 15-second anti-spam cooldown
 
-            if(g_currentSignalID != "")
+            if(sym==_Symbol && g_currentSignalID!="" && StringFind(cmt,"SEGS|ADV|"+SEGSShortSignalID(g_currentSignalID)+"|")>=0)
             {
-               string sigExecKey = "SEGS_SIG_EXEC_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + g_currentSignalID;
+               string sigExecKey = SEGSExecutionKey(g_currentSignalID,false);
                GlobalVariableSet(sigExecKey, 4.0); // 4.0 = MANUALLY CLOSED / CONSUMED
+               g_currentTradeTaken = true;
             }
-            g_currentTradeTaken = true;
          }
          return;
       }
@@ -2862,12 +2865,12 @@ bool SafePositionClose(ulong ticket, string reason = "MANUAL_CLOSE")
       string gvCdKey = "SEGS_COOLDOWN_" + cleanSym + "_" + IntegerToString(login);
              GlobalVariableSet(gvCdKey, (double)(TimeCurrent() + 15)); // 15-second anti-spam cooldown
 
-      if(g_currentSignalID != "")
+      if(sym==_Symbol && g_currentSignalID!="" && StringFind(cmt,"SEGS|ADV|"+SEGSShortSignalID(g_currentSignalID)+"|")>=0)
       {
-         string sigExecKey = "SEGS_SIG_EXEC_" + IntegerToString(login) + "_" + g_currentSignalID;
+         string sigExecKey = SEGSExecutionKey(g_currentSignalID,false);
          GlobalVariableSet(sigExecKey, 4.0); // 4.0 = MANUALLY CLOSED / CONSUMED
+         g_currentTradeTaken = true;
       }
-      g_currentTradeTaken = true;
 
       // Clean up position group tracking if registered
       int gCount = ArraySize(g_groups);
@@ -3571,42 +3574,7 @@ void UpdateOpenTradeMarkings()
          ArrayResize(activeObjects, activeCount + 1);
          activeObjects[activeCount++] = tpName;
       }
-      else
-      {
-         // Project planned advisor targets if unassigned on ticket
-         if(g_staticTP1 > 0.0)
-         {
-            string tp1Name = PREFIX + "OTM_TP1_" + IntegerToString(ticket);
-            CreateOpenTradeHLine(tp1Name, g_staticTP1, InpColorOpenTP1, STYLE_DOT, 1,
-                                 StringFormat("🏁 [PROJ TP1 #%I64u - FTA SCALE] %s (1.40R)", ticket, DoubleToString(g_staticTP1, digits)));
-            ArrayResize(activeObjects, activeCount + 1);
-            activeObjects[activeCount++] = tp1Name;
-         }
-         if(g_staticTP2 > 0.0)
-         {
-            string tp2Name = PREFIX + "OTM_TP2_" + IntegerToString(ticket);
-            CreateOpenTradeHLine(tp2Name, g_staticTP2, InpColorOpenTP2, STYLE_DOT, 1,
-                                 StringFormat("🔒 [PROJ TP2 #%I64u - BE LOCK] %s (2.80R)", ticket, DoubleToString(g_staticTP2, digits)));
-            ArrayResize(activeObjects, activeCount + 1);
-            activeObjects[activeCount++] = tp2Name;
-         }
-         if(g_staticTP3 > 0.0)
-         {
-            string tp3Name = PREFIX + "OTM_TP3_" + IntegerToString(ticket);
-            CreateOpenTradeHLine(tp3Name, g_staticTP3, InpColorOpenTP3, STYLE_DOT, 1,
-                                 StringFormat("🚀 [PROJ TP3 #%I64u - HTF POOL] %s (4.80R)", ticket, DoubleToString(g_staticTP3, digits)));
-            ArrayResize(activeObjects, activeCount + 1);
-            activeObjects[activeCount++] = tp3Name;
-         }
-         if(g_staticTP4 > 0.0)
-         {
-            string tp4Name = PREFIX + "OTM_TP4_" + IntegerToString(ticket);
-            CreateOpenTradeHLine(tp4Name, g_staticTP4, InpColorOpenTP4, STYLE_DOT, 1,
-                                 StringFormat("🏆 [PROJ TP4 #%I64u - MACRO RUNNER] %s (8.00R)", ticket, DoubleToString(g_staticTP4, digits)));
-            ArrayResize(activeObjects, activeCount + 1);
-            activeObjects[activeCount++] = tp4Name;
-         }
-      }
+      // Missing broker targets are not projected from a different candidate/setup.
    }
 
    // Clean up stale OTM objects that are no longer active
@@ -6090,6 +6058,12 @@ string SEGSShortSignalID(string signalID)
    return StringFormat("%08X%08X",SEGSHistoryHash(signalID),SEGSHistoryHash("ID:"+signalID));
 }
 
+string SEGSExecutionKey(string signalID, bool pending)
+{
+   return (pending ? "SEGS_SIG_PENDING_TIME_" : "SEGS_SIG_EXEC_")+
+      IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"_"+SEGSShortSignalID(signalID);
+}
+
 string BuildStableSignalID(string sym, string dir, datetime triggerCandleTime, datetime pivotCandleTime)
 {
    datetime torontoConf = ConvertBrokerTimeToToronto(triggerCandleTime);
@@ -6099,12 +6073,12 @@ string BuildStableSignalID(string sym, string dir, datetime triggerCandleTime, d
    TimeToStruct(torontoConf, mdtC);
    TimeToStruct(torontoPiv, mdtP);
 
-   return StringFormat("%I64d_%s_%s_%04d%02d%02d_%02d%02d_PIVOT_%04d%02d%02d_%02d%02d",
+   return StringFormat("%I64d_%s_%s_%04d%02d%02d_%02d%02d_PIVOT_%04d%02d%02d_%02d%02d_C%I64d",
       AccountInfoInteger(ACCOUNT_LOGIN),
       sym,
       dir,
       mdtC.year, mdtC.mon, mdtC.day, mdtC.hour, mdtC.min,
-      mdtP.year, mdtP.mon, mdtP.day, mdtP.hour, mdtP.min);
+      mdtP.year, mdtP.mon, mdtP.day, mdtP.hour, mdtP.min, (long)iTime(sym,PERIOD_M5,1));
 }
 
 // 12. Robust SEGS Managed Position Identification (Section 11)
@@ -6167,82 +6141,106 @@ int CountOpenAdvisorTradesForSymbol(string sym)
    return count;
 }
 
+// Four legs with the same explicit setup tag count as one setup, even with delayed fills.
 int CountOpenAdvisorSetsForSymbol(string sym)
 {
-   datetime openTimes[];
-   ArrayResize(openTimes, 0);
-   int setCount = 0;
-   
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   string keys[];
+   for(int i=PositionsTotal()-1; i>=0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0 && posInfo.SelectByTicket(ticket))
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !posInfo.SelectByTicket(ticket) || posInfo.Symbol()!=sym) continue;
+      string comment=posInfo.Comment();
+      if(posInfo.Magic()!=InpAdvisorMagicNumber && StringFind(comment,"SEGS|ADV|")<0 &&
+         StringFind(comment,"[MyAdvisor]")<0 && StringFind(comment,"[Advised")<0) continue;
+      string key="";
+      int start=StringFind(comment,"SEGS|ADV|");
+      if(start>=0)
       {
-         if(posInfo.Symbol() == sym)
-         {
-            long magic = posInfo.Magic();
-            bool isAdv = (magic == InpAdvisorMagicNumber);
-            if(!isAdv)
-            {
-               string cmt = posInfo.Comment();
-               if(StringFind(cmt, "[MyAdvisor]") >= 0 || StringFind(cmt, "SEGS|ADV") >= 0 || StringFind(cmt, "[Advised") >= 0)
-                  isAdv = true;
-            }
-            if(isAdv)
-            {
-               datetime posTime = (datetime)PositionGetInteger(POSITION_TIME);
-               bool found = false;
-               for(int k = 0; k < ArraySize(openTimes); k++)
-               {
-                  if(MathAbs((long)(posTime - openTimes[k])) <= 5)
-                  {
-                     found = true;
-                     break;
-                  }
-               }
-               if(!found)
-               {
-                  int sz = ArraySize(openTimes);
-                  ArrayResize(openTimes, sz + 1);
-                  openTimes[sz] = posTime;
-                  setCount++;
-               }
-            }
-         }
+         string tail=StringSubstr(comment,start+9); int end=StringFind(tail,"|");
+         if(end>0) key=StringSubstr(tail,0,end);
+      }
+      // Unknown legacy positions are counted separately; timestamps never merge unrelated setups.
+      if(key=="") key="POSITION_"+IntegerToString((long)posInfo.Identifier());
+      bool found=false;
+      for(int k=0; k<ArraySize(keys); k++) if(keys[k]==key) { found=true; break; }
+      if(!found)
+      {
+         int size=ArraySize(keys);
+         if(ArrayResize(keys,size+1)!=size+1) return MathMax(1,InpMaxSetsPerSymbol);
+         keys[size]=key;
       }
    }
-   return setCount;
+   return ArraySize(keys);
 }
 
 bool HasOpenAdvisorTradesForSignal(string sym, string signalID)
 {
-   if(signalID == "") return false;
-
-   // STANDARD RULE: An advisor trade is ONLY open if real positions currently exist in terminal!
-   if(CountOpenAdvisorTradesForSymbol(sym) == 0)
-      return false;
-
-   string shortSig = SEGSShortSignalID(signalID);
-
-   // Scan open positions on this symbol for matching signal tag
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   if(signalID=="") return false;
+   string tag="SEGS|ADV|"+SEGSShortSignalID(signalID)+"|";
+   for(int i=PositionsTotal()-1; i>=0; i--)
    {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket > 0 && posInfo.SelectByTicket(ticket))
-      {
-         if(posInfo.Symbol() == sym)
-         {
-            long magic = posInfo.Magic();
-            if(magic == InpAdvisorMagicNumber)
-            {
-               string cmt = posInfo.Comment();
-               if(shortSig == "" || StringFind(cmt, shortSig) >= 0 || StringFind(cmt, "SEGS|ADV|") >= 0 || StringFind(cmt, "[MyAdvisor]") >= 0)
-                  return true;
-            }
-         }
-      }
+      ulong ticket=PositionGetTicket(i);
+      if(ticket>0 && posInfo.SelectByTicket(ticket) && posInfo.Symbol()==sym && StringFind(posInfo.Comment(),tag)>=0)
+         return true;
    }
    return false;
+}
+
+bool SEGSCanScanNewSetup(string sym)
+{
+   if(CountOpenAdvisorSetsForSymbol(sym)>=MathMax(1,InpMaxSetsPerSymbol)) return false;
+   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+   {
+      // Netting accounts merge entries and cannot maintain two independent broker stop/TP sets.
+      for(int i=PositionsTotal()-1; i>=0; i--)
+      {
+         ulong ticket=PositionGetTicket(i);
+         if(ticket>0 && posInfo.SelectByTicket(ticket) && posInfo.Symbol()==sym) return false;
+      }
+   }
+   return true;
+}
+
+bool SEGSFreshConfirmationAfterOtherSet(string sym, string signalID)
+{
+   string tag=signalID!="" ? "SEGS|ADV|"+SEGSShortSignalID(signalID)+"|" : "";
+   datetime latestOther=0;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !posInfo.SelectByTicket(ticket) || posInfo.Symbol()!=sym) continue;
+      if(tag!="" && StringFind(posInfo.Comment(),tag)>=0) continue; // Own legs cannot invalidate the next leg.
+      latestOther=(datetime)MathMax((long)latestOther,(long)posInfo.Time());
+   }
+   if(latestOther==0) return true;
+   // A fully new completed M5 rejection, formed after the other entry, is required.
+   return iTime(sym,PERIOD_M5,1)>=latestOther;
+}
+
+bool SEGSEnsureCandidateIdentity(string sym)
+{
+   if(g_currentAdvisedAction!="BUY" && g_currentAdvisedAction!="SELL") return false;
+   datetime confirmation=iTime(sym,PERIOD_M5,1);
+   if(confirmation<=0) return false;
+   if(g_currentSignalID=="")
+   {
+      g_currentSignalID=BuildStableSignalID(sym,g_currentAdvisedAction,iTime(sym,PERIOD_H1,1),
+         g_obSignalOrigin>0 ? g_obSignalOrigin : g_recentPivotTime);
+      g_signalTriggerTime=TimeCurrent(); g_signalGeneratedWhileAdvisorEnabled=g_myAdvisorEnabled;
+   }
+   return true;
+}
+
+void SEGSReleaseExecutedCandidate(string sym)
+{
+   if(!HasOpenAdvisorTradesForSignal(sym,g_currentSignalID)) return;
+   // Broker positions, per-setup stops/targets and execution records remain untouched.
+   g_hasViableEntry=false; g_currentTradeTaken=false; g_isSignalExpired=false;
+   g_currentSignalID=""; g_currentAdvisedAction="NONE"; g_plannedAction="NONE";
+   g_staticEntryPrice=0; g_staticSL=0; g_staticTP1=0; g_staticTP2=0; g_staticTP3=0; g_staticTP4=0;
+   g_setupState="SCANNING"; g_lastAdviceScanBarTime=0;
+   g_signalStatusLabel="SCANNING FOR AN INDEPENDENT SETUP";
+   ClearActiveSignalSnapshot(sym);
 }
 
 bool HasOpenAdvisorTradesForSymbol(string sym)
@@ -6451,8 +6449,7 @@ bool CheckConfirmedSafeZoneBounce(string sym, string dir, double safeEntry)
 
 bool IsAdvisorTradeTaken(string sym, string signalID)
 {
-   int openCount = CountOpenAdvisorTradesForSymbol(sym);
-   if(openCount > 0)
+   if(HasOpenAdvisorTradesForSignal(sym,signalID))
    {
       g_currentTradeTaken = true;
       return true;
@@ -6461,13 +6458,13 @@ bool IsAdvisorTradeTaken(string sym, string signalID)
    // If order is actively in flight (state == 1.0 within 15 seconds)
    if(signalID != "")
    {
-      string sigExecKey = "SEGS_SIG_EXEC_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + signalID;
+      string sigExecKey = SEGSExecutionKey(signalID,false);
       if(GlobalVariableCheck(sigExecKey))
       {
          double state = GlobalVariableGet(sigExecKey);
          if(state == 1.0)
          {
-            string pendingTimeKey = "SEGS_SIG_PENDING_TIME_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + signalID;
+            string pendingTimeKey = SEGSExecutionKey(signalID,true);
             if(GlobalVariableCheck(pendingTimeKey))
             {
                datetime pTime = (datetime)GlobalVariableGet(pendingTimeKey);
@@ -7644,78 +7641,108 @@ void SEGSAddStopAnchor(double value, bool buy, double entry, double floorOrCeili
       (nearby == 0.0 || (buy ? value < nearby : value > nearby))) nearby = value;
 }
 
+// A structural invalidation is never moved inside the block to satisfy a distance limit.
+double SEGSStopLimit(double entry, double atr)
+{
+   if(entry<=0 || atr<=0 || !MathIsValidNumber(entry) || !MathIsValidNumber(atr)) return 0.0;
+   double limit=g_systemMaxStopATR*atr;
+   if(g_systemMaxStopPercent>0) limit=MathMin(limit,entry*g_systemMaxStopPercent/100.0);
+   return MathIsValidNumber(limit) && limit>0 ? limit : 0.0;
+}
+
+bool SEGSResolveEntryWick(string sym, double zoneLow, double zoneHigh, bool buy, double &low, double &high)
+{
+   low=zoneLow; high=zoneHigh;
+   if(sym!=_Symbol || low<=0 || high<=low) return false;
+   double tick=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE);
+   for(int pass=0; pass<2; pass++)
+   {
+      int count=pass==0 ? ArraySize(g_orderBlocks) : ArraySize(g_h1OrderBlocks);
+      for(int i=0; i<count; i++)
+      {
+         M30OrderBlock ob;
+         if(pass==0) ob=g_orderBlocks[i]; else ob=g_h1OrderBlocks[i];
+         if(ob.invalidated || ob.bullish!=buy || MathAbs(ob.low-zoneLow)>tick || MathAbs(ob.high-zoneHigh)>tick) continue;
+         if(ob.wickLow>0 && ob.wickHigh>ob.wickLow)
+            { low=ob.wickLow; high=ob.wickHigh; return true; }
+         return false; // A body-only zone without its origin wick is not an authoritative stop anchor.
+      }
+   }
+   // Structural callers may supply explicit wick bounds; live execution always resolves an actual block.
+   return low>0 && high>low;
+}
+
+double SEGSFinalizeStructuralStop(string sym, bool buy, double entry, double anchor, double atr, double boundary)
+{
+   double tick=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE),pt=SymbolInfoDouble(sym,SYMBOL_POINT);
+   if(anchor<=0 || tick<=0 || pt<=0 || (buy ? anchor>=entry : anchor<=entry)) return 0.0;
+   double buffer=MathMax(g_systemOBBufferATR*atr,g_systemOBBufferTicks*tick);
+   double stop=buy ? anchor-buffer : anchor+buffer;
+   MqlTick quote;
+   if(!SymbolInfoTick(sym,quote) || !MathIsValidNumber(quote.bid) || !MathIsValidNumber(quote.ask) || quote.bid<=0 || quote.ask<quote.bid) return 0.0;
+   double broker=MathMax((double)SymbolInfoInteger(sym,SYMBOL_TRADE_STOPS_LEVEL)*pt,tick)+2*tick;
+   stop=buy ? MathMin(stop,MathMin(entry,quote.bid)-broker) : MathMax(stop,MathMax(entry,quote.ask)+broker);
+   stop=(buy ? MathFloor(stop/tick) : MathCeil(stop/tick))*tick;
+   stop=NormalizeDouble(stop,(int)SymbolInfoInteger(sym,SYMBOL_DIGITS));
+   if(!MathIsValidNumber(stop) || stop<=0 || (buy ? stop>=entry : stop<=entry)) return 0.0;
+   if(boundary>0 && (buy ? stop>=boundary : stop<=boundary)) return 0.0;
+   double limit=SEGSStopLimit(entry,atr);
+   if(limit<=0 || MathAbs(entry-stop)>limit+tick*0.000001) return 0.0;
+   return stop;
+}
+
+void SEGSConsiderInstitutionalStop(string sym, bool buy, double entry, double anchor, double atr,
+                                  double boundary, double &best)
+{
+   // A fallback may not sit inside the entered block's full wick.
+   if(boundary>0 && (buy ? anchor>=boundary : anchor<=boundary)) return;
+   double candidate=SEGSFinalizeStructuralStop(sym,buy,entry,anchor,atr,boundary);
+   if(candidate>0 && (best<=0 || MathAbs(entry-candidate)<MathAbs(entry-best))) best=candidate;
+}
+
 double GetSafestStructuralStopLoss(string sym, string dir, double entryPrice, double obZoneLow, double obZoneHigh, double curAtr, bool preferMultiDay=false)
 {
-   if((dir != "BUY" && dir != "SELL") || !MathIsValidNumber(entryPrice) || entryPrice <= 0.0 ||
-      !SEGSMarketReady(sym)) return 0.0;
-   bool buy = (dir == "BUY");
-   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
-   double tick = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
-   if(!MathIsValidNumber(pt) || pt <= 0.0 || !MathIsValidNumber(tick) || tick <= 0.0) return 0.0;
-   int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-   double atr = MathIsValidNumber(curAtr) ? MathMax(0.0, curAtr) : 0.0;
-   double buffer = MathMax(MathMax(0.0, InpStructuralBufferATR) * atr, 3.0 * tick);
-   double proximity = MathMax(MathMax(0.0, InpDualProximityATR) * atr, 6.0 * tick);
-   bool validOB = MathIsValidNumber(obZoneLow) && MathIsValidNumber(obZoneHigh) &&
-                  obZoneLow > 0.0 && obZoneHigh > obZoneLow &&
-                  (buy ? obZoneLow < entryPrice : obZoneHigh > entryPrice);
-   double boundary = validOB ? (buy ? obZoneLow : obZoneHigh) : 0.0;
-   double extreme = 0.0, nearby = 0.0;
-   for(int d = 1; d <= 5; d++)
-      SEGSAddStopAnchor(buy ? iLow(sym, PERIOD_D1, d) : iHigh(sym, PERIOD_D1, d),
-                        buy, entryPrice, boundary, proximity, extreme, nearby);
-   for(int h = 1; h <= 24; h++)
+   if((dir!="BUY" && dir!="SELL") || !SEGSMarketReady(sym) || !MathIsValidNumber(curAtr) || curAtr<=0 ||
+      !MathIsValidNumber(entryPrice) || entryPrice<=0) return 0.0;
+   bool buy=dir=="BUY";
+   double low=0,high=0;
+   bool hasBlock=SEGSResolveEntryWick(sym,obZoneLow,obZoneHigh,buy,low,high);
+   if(obZoneLow>0 && obZoneHigh>obZoneLow && !hasBlock) return 0.0;
+   if(g_systemStopStyle==SL_STYLE_ACTIVE_ORDER_BLOCK && !hasBlock)
    {
-      double v = buy ? iLow(sym, PERIOD_H4, h) : iHigh(sym, PERIOD_H4, h);
-      double left = buy ? iLow(sym, PERIOD_H4, h+1) : iHigh(sym, PERIOD_H4, h+1);
-      // Bar 1 uses only completed neighbors, never the forming H4 bar.
-      int neighbor = h == 1 ? 3 : h-1;
-      double right = buy ? iLow(sym, PERIOD_H4, neighbor) : iHigh(sym, PERIOD_H4, neighbor);
-      if(left > 0.0 && right > 0.0 && (buy ? (v <= left && v <= right) : (v >= left && v >= right)))
-         SEGSAddStopAnchor(v, buy, entryPrice, boundary, proximity, extreme, nearby);
+      double activeLow=0,activeHigh=0;
+      if(!SEGSSelectActiveOrderBlock(sym,buy,entryPrice,curAtr,activeLow,activeHigh) ||
+         !SEGSResolveEntryWick(sym,activeLow,activeHigh,buy,low,high)) return 0.0;
+      hasBlock=true;
    }
-   SEGSAddStopAnchor(buy ? iLow(sym, PERIOD_D1, 1) : iHigh(sym, PERIOD_D1, 1), buy, entryPrice, boundary, proximity, extreme, nearby);
-   SEGSAddStopAnchor(buy ? iLow(sym, PERIOD_W1, 1) : iHigh(sym, PERIOD_W1, 1), buy, entryPrice, boundary, proximity, extreme, nearby);
-   // Global structure belongs to this chart symbol only.
-   if(sym == _Symbol)
+   double boundary=hasBlock ? (buy ? low : high) : 0.0;
+   if(hasBlock && (buy ? boundary>=entryPrice : boundary<=entryPrice)) return 0.0;
+   // Dual default is wick FIRST. A nearby daily/weekly extreme can no longer silently widen it.
+   bool preferInstitutional=g_systemStopStyle==SL_STYLE_MULTI_DAY || (preferMultiDay && !hasBlock);
+   if(hasBlock && !preferInstitutional)
    {
-      SEGSAddStopAnchor(buy ? g_recentSwingLow : g_recentSwingHigh, buy, entryPrice, boundary, proximity, extreme, nearby);
-      SEGSAddStopAnchor(buy ? g_recentSupport : g_recentResistance, buy, entryPrice, boundary, proximity, extreme, nearby);
+      double primary=SEGSFinalizeStructuralStop(sym,buy,entryPrice,boundary,curAtr,boundary);
+      if(primary>0) return primary;
    }
-   ENUM_SEGS_SL_STYLE style = g_systemStopStyle;
-   // A caller's swing preference must never discard the entered OB boundary.
-   if(preferMultiDay && !validOB && style == SL_STYLE_AUTO_DUAL) style = SL_STYLE_MULTI_DAY;
-   double anchor = 0.0;
-   if(style == SL_STYLE_ACTIVE_ORDER_BLOCK)
+   if(g_systemStopStyle==SL_STYLE_ORDER_BLOCK || g_systemStopStyle==SL_STYLE_ACTIVE_ORDER_BLOCK) return 0.0;
+   double best=0;
+   for(int d=1; d<=5; d++)
+      SEGSConsiderInstitutionalStop(sym,buy,entryPrice,buy ? iLow(sym,PERIOD_D1,d) : iHigh(sym,PERIOD_D1,d),curAtr,boundary,best);
+   for(int h=2; h<=24; h++)
    {
-      double activeLow = 0.0, activeHigh = 0.0;
-      if(!SEGSSelectActiveOrderBlock(sym, buy, entryPrice, atr, activeLow, activeHigh)) return 0.0;
-      anchor = buy ? activeLow : activeHigh;
-      buffer = MathMax(g_systemOBBufferATR * atr, g_systemOBBufferTicks * tick);
+      double value=buy ? iLow(sym,PERIOD_H4,h) : iHigh(sym,PERIOD_H4,h);
+      double older=buy ? iLow(sym,PERIOD_H4,h+1) : iHigh(sym,PERIOD_H4,h+1);
+      double newer=buy ? iLow(sym,PERIOD_H4,h-1) : iHigh(sym,PERIOD_H4,h-1);
+      if(value>0 && older>0 && newer>0 && (buy ? value<older && value<=newer : value>older && value>=newer))
+         SEGSConsiderInstitutionalStop(sym,buy,entryPrice,value,curAtr,boundary,best);
    }
-   else if(style == SL_STYLE_ORDER_BLOCK) anchor = boundary;
-   else if(style == SL_STYLE_MULTI_DAY)
+   SEGSConsiderInstitutionalStop(sym,buy,entryPrice,buy ? iLow(sym,PERIOD_W1,1) : iHigh(sym,PERIOD_W1,1),curAtr,boundary,best);
+   if(sym==_Symbol)
    {
-      anchor = extreme;
-      // Even explicit swing mode must invalidate the entered zone, not sit inside it.
-      if(validOB) anchor = anchor > 0.0 ? (buy ? MathMin(anchor, boundary) : MathMax(anchor, boundary)) : boundary;
+      SEGSConsiderInstitutionalStop(sym,buy,entryPrice,buy ? g_recentSwingLow : g_recentSwingHigh,curAtr,boundary,best);
+      SEGSConsiderInstitutionalStop(sym,buy,entryPrice,buy ? g_recentSupport : g_recentResistance,curAtr,boundary,best);
    }
-   else anchor = validOB ? (nearby > 0.0 ? nearby : boundary) : extreme;
-   // No fabricated structural stop: caller must defer when the required anchor is absent.
-   if(anchor <= 0.0) return 0.0;
-   double stop = buy ? anchor - buffer : anchor + buffer;
-   MqlTick quote;
-   if(!SymbolInfoTick(sym, quote) || !MathIsValidNumber(quote.bid) ||
-      !MathIsValidNumber(quote.ask) || quote.bid <= 0.0 || quote.ask < quote.bid) return 0.0;
-   double distance = MathMax((double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * pt, tick) + 2.0 * tick;
-   if(buy) stop = MathMin(stop, MathMin(entryPrice, quote.bid) - distance);
-   else stop = MathMax(stop, MathMax(entryPrice, quote.ask) + distance);
-   // Round away from invalidation, never towards the OB or broker boundary.
-   stop = (buy ? MathFloor(stop / tick) : MathCeil(stop / tick)) * tick;
-   stop = NormalizeDouble(stop, digits);
-   if(!MathIsValidNumber(stop) || stop <= 0.0) return 0.0;
-   if(validOB && style != SL_STYLE_ACTIVE_ORDER_BLOCK && (buy ? stop >= boundary : stop <= boundary)) return 0.0;
-   return stop;
+   return best; // Zero means defer; no arbitrary tight stop replaces missing institutional structure.
 }
 
 //+------------------------------------------------------------------+
@@ -8315,6 +8342,8 @@ void UpdateM30OrderBlocks(bool forceScan=false)
       ob.bullish          = validBull;
       ob.high             = zoneHigh;
       ob.low              = zoneLow;
+      ob.wickLow          = r[i].low;
+      ob.wickHigh         = r[i].high;
       ob.originTime       = r[i].time;
       ob.confirmTime      = r[i - 2].time;
       ob.touchCount       = 0;
@@ -8752,6 +8781,8 @@ void UpdateH1OrderBlocks(bool forceScan=false)
       ob.bullish          = validBull;
       ob.high             = zoneHigh;
       ob.low              = zoneLow;
+      ob.wickLow          = r[i].low;
+      ob.wickHigh         = r[i].high;
       ob.originTime       = r[i].time;
       ob.confirmTime      = r[i - 2].time;
       ob.touchCount       = 0;
@@ -9539,7 +9570,7 @@ bool SEGSAdvisorEntryGate(string sym, string dir, double entry, double stop, boo
    double tolerance=MathMax(2*tick,0.10*atr);
    if(reason!="TREND ALIGNED" && MathAbs(reversalEntry-entry)>tolerance)
       { reason="REVERSAL CONFIRMED ON A DIFFERENT ZONE"; return false; }
-   double zoneLow=0,zoneHigh=0;
+   double zoneLow=0,zoneHigh=0,wickLow=0,wickHigh=0;
    bool found=false;
    for(int pass=0; pass<2; pass++)
    {
@@ -9550,7 +9581,7 @@ bool SEGSAdvisorEntryGate(string sym, string dir, double entry, double stop, boo
          if(pass==0) ob=g_orderBlocks[i]; else ob=g_h1OrderBlocks[i];
          if(ob.invalidated || ob.bullish!=(dir=="BUY")) continue;
          if(entry<ob.low-tolerance || entry>ob.high+tolerance) continue;
-         zoneLow=ob.low; zoneHigh=ob.high; found=true; break;
+         zoneLow=ob.low; zoneHigh=ob.high; wickLow=ob.wickLow; wickHigh=ob.wickHigh; found=true; break;
       }
       if(found) break;
    }
@@ -9574,20 +9605,51 @@ bool SEGSAdvisorEntryGate(string sym, string dir, double entry, double stop, boo
             { reason="ENTRY COLLIDES WITH OPPOSING ORDER BLOCK"; return false; }
       }
    }
+   if(requireTouch && g_activeEntryStrategy=="ORDER_BLOCK" && (wickLow<=0 || wickHigh<=wickLow))
+      { reason="WAITING FOR ORIGINAL ENTRY BLOCK WICK"; return false; }
+   if(requireTouch && !SEGSFreshConfirmationAfterOtherSet(sym,g_currentSignalID))
+      { reason="WAIT FOR A NEW CONFIRMATION AFTER THE EXISTING ENTRY"; return false; }
    if(requireTouch && !SEGSRecentZoneRejection(sym,dir,zoneLow,zoneHigh,atr))
       { reason="WAITING FOR CLOSED-CANDLE REJECTION AT ENTRY ZONE"; return false; }
+   if(requireTouch) { g_executionZoneLow=wickLow; g_executionZoneHigh=wickHigh; }
    reason="DIRECTION, ZONE AND ENTRY CONFIRMED";
+   return true;
+}
+
+bool SEGSApplyPendingStopPolicy(string sym, string dir)
+{
+   double atrBuf[];
+   if(g_hAtr_H1==INVALID_HANDLE || CopyBuffer(g_hAtr_H1,0,1,1,atrBuf)!=1 || atrBuf[0]<=0) return false;
+   double low=0,high=0,tolerance=MathMax(2*SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE),0.10*atrBuf[0]);
+   for(int pass=0; pass<2; pass++)
+   {
+      int count=pass==0 ? ArraySize(g_orderBlocks) : ArraySize(g_h1OrderBlocks);
+      for(int i=0; i<count; i++)
+      {
+         M30OrderBlock ob;
+         if(pass==0) ob=g_orderBlocks[i]; else ob=g_h1OrderBlocks[i];
+         if(!ob.invalidated && ob.bullish==(dir=="BUY") && g_staticEntryPrice>=ob.low-tolerance && g_staticEntryPrice<=ob.high+tolerance)
+            { low=ob.low; high=ob.high; break; }
+      }
+      if(low>0) break;
+   }
+   double stop=GetSafestStructuralStopLoss(sym,dir,g_staticEntryPrice,low,high,atrBuf[0]);
+   if(stop<=0) return false;
+   g_staticSL=stop;
+   BuildStructuralTargets(sym,dir,g_staticEntryPrice,stop,atrBuf[0],g_staticTP1,g_staticTP2,g_staticTP3,g_staticTP4,g_rrTP2,g_rrWeighted);
    return true;
 }
 
 void SEGSReviewPendingAdvice()
 {
-   if(CountOpenAdvisorTradesForSymbol(_Symbol)>0) return; // Existing positions are historical executions, not fresh advice.
+   if(HasOpenAdvisorTradesForSignal(_Symbol,g_currentSignalID)) return;
    string dir=g_currentAdvisedAction;
    if(dir!="BUY" && dir!="SELL") dir=g_plannedAction;
    if(dir!="BUY" && dir!="SELL") return;
    string reason="";
-   if(!SEGSAdvisorEntryGate(_Symbol,dir,g_staticEntryPrice,g_staticSL,false,reason))
+   bool stopReady=SEGSApplyPendingStopPolicy(_Symbol,dir);
+   if(!stopReady) reason="NO STRUCTURAL STOP FITS THE SYSTEM DISTANCE CAP";
+   if(!stopReady || !SEGSAdvisorEntryGate(_Symbol,dir,g_staticEntryPrice,g_staticSL,false,reason))
    {
       g_hasViableEntry=false; g_currentAdvisedAction="NONE"; g_plannedAction="NONE";
       g_setupState="SCANNING"; g_lastAdviceScanBarTime=0;
@@ -9729,7 +9791,7 @@ bool IsPlannedEntryViable(string sym, string action, double entryPrice, double s
 //+------------------------------------------------------------------+
 bool SEGSResetExpiredSetup(string sym)
 {
-   if(CountOpenAdvisorTradesForSymbol(sym) > 0) return false;
+   if(HasOpenAdvisorTradesForSignal(sym,g_currentSignalID)) return false;
    if(!g_isSignalExpired && g_setupState != "EXPIRED" && g_setupState != "INVALIDATED" && g_setupState != "CANCELLED") return false;
    g_isSignalExpired = false;
    g_hasViableEntry = false;
@@ -9941,6 +10003,7 @@ bool EvaluateTrendReversalConditions(string sym, string proposedDir,
 void ScanMarketStructureAndAdvice(bool forceScan=false)
 {
    string sym = _Symbol;
+   SEGSReleaseExecutedCandidate(sym);
    if(SEGSResetExpiredSetup(sym)) forceScan = true;
    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
    double pipSize = GetPipSize(sym);
@@ -9968,7 +10031,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
    // TOP-PRIORITY REAL-TIME VIABILITY & DYNAMIC CANCELLATION EVALUATOR:
    // Runs unconditionally on EVERY tick / timer execution!
    // If any planned entry has been breached, approached Stop Loss, or become unviable, CANCEL IT IMMEDIATELY!
-   if(CountOpenAdvisorTradesForSymbol(sym) == 0 && (g_staticEntryPrice > 0.0 || g_setupState == "WATCHING" || g_setupState == "READY"))
+   if(!HasOpenAdvisorTradesForSignal(sym,g_currentSignalID) && (g_staticEntryPrice > 0.0 || g_setupState == "WATCHING" || g_setupState == "READY"))
    {
       double curPriceCheck = SymbolInfoDouble(sym, SYMBOL_BID);
       if(curPriceCheck <= 0.0) curPriceCheck = iClose(sym, PERIOD_M1, 0);
@@ -10009,7 +10072,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
 
       // Validate planned entry viability before preserving:
       // If there are no open trades taken, an unviable planned entry must be cancelled!
-      if(CountOpenAdvisorTradesForSymbol(sym) == 0 && (g_hasViableEntry || g_setupState == "WATCHING") && g_staticEntryPrice > 0.0)
+      if(!HasOpenAdvisorTradesForSignal(sym,g_currentSignalID) && (g_hasViableEntry || g_setupState == "WATCHING") && g_staticEntryPrice > 0.0)
       {
          double curPriceGate = SymbolInfoDouble(sym, SYMBOL_BID);
          if(curPriceGate <= 0.0) curPriceGate = iClose(sym, PERIOD_M1, 0);
@@ -10066,7 +10129,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
 
       // Validate planned entry viability before preserving:
       // If there are no open trades taken, an unviable planned entry must be cancelled!
-      if(CountOpenAdvisorTradesForSymbol(sym) == 0 && (g_hasViableEntry || g_setupState == "WATCHING") && g_staticEntryPrice > 0.0)
+      if(!HasOpenAdvisorTradesForSignal(sym,g_currentSignalID) && (g_hasViableEntry || g_setupState == "WATCHING") && g_staticEntryPrice > 0.0)
       {
          double curPriceGate = SymbolInfoDouble(sym, SYMBOL_BID);
          if(curPriceGate <= 0.0) curPriceGate = iClose(sym, PERIOD_M1, 0);
@@ -10122,7 +10185,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
    bool isUSIndexOrEquity = (symAssetClass == "INDEX" || symAssetClass == "EQUITY");
    if(isUSIndexOrEquity && (g_cashSession == CASH_SESSION_AFTERHOURS || g_cashSession == CASH_SESSION_OVERNIGHT))
    {
-      if(CountOpenAdvisorTradesForSymbol(sym) == 0 && (!g_hasViableEntry || g_setupState != "READY"))
+      if(!HasOpenAdvisorTradesForSignal(sym,g_currentSignalID) && (!g_hasViableEntry || g_setupState != "READY"))
       {
          g_setupState = "STANDBY";
          g_primaryRejectionReason = "US CASH SESSION CLOSED (16:00-09:30 NY) - NEW TRADES PROHIBITED ON INDICES/EQUITIES";
@@ -10185,122 +10248,15 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
    datetime curH1BarTime = iTime(sym, PERIOD_H1, 0);
    datetime triggerBarTime = iTime(sym, PERIOD_H1, 1);
 
-   // 6B. ACTIVE SAFE TRADE RUNNING ON SYMBOL GUARD
-   // User Mandate: "When there is an open safe trade, there is no need to take another less safe trade
-   // except price is confirmed to have returned to and bounce off the safe trade zone(entry zone)."
-   string activeTradeDir = "NONE";
-   double activeSafeEntry = 0.0, activeSafeSL = 0.0;
-   double activeSafeTP1 = 0.0, activeSafeTP2 = 0.0, activeSafeTP3 = 0.0, activeSafeTP4 = 0.0;
-   int openSafeCount = 0;
-   
-   if(GetOpenAdvisorTradeDetails(sym, activeTradeDir, activeSafeEntry, activeSafeSL, activeSafeTP1, activeSafeTP2, activeSafeTP3, activeSafeTP4, openSafeCount))
-   {
-      double curPrice = SymbolInfoDouble(sym, SYMBOL_BID);
-      if(curPrice <= 0.0) curPrice = iClose(sym, PERIOD_M1, 0);
-      if(curPrice <= 0.0) curPrice = iClose(sym, PERIOD_H1, 0);
-
-      double pip = pipSize;
-      double curAtr = 0.0;
-      if(g_hAtr_H1 != INVALID_HANDLE)
-      {
-         double atrBuf[];
-         ArraySetAsSeries(atrBuf, true);
-         if(CopyBuffer(g_hAtr_H1, 0, 1, 1, atrBuf) == 1) curAtr = atrBuf[0];
-      }
-      if(curAtr <= 0.0) curAtr = 20.0 * pip;
-
-      double safeZoneTolerance = MathMax(0.50 * curAtr, 15.0 * pip);
-      double distFromSafeEntry = MathAbs(curPrice - activeSafeEntry);
-      bool isInsideSafeZone = (distFromSafeEntry <= safeZoneTolerance);
-
-      // Lock onto active safe trade coordinates - never arm secondary extended setups!
-      g_currentAdvisedAction = activeTradeDir;
-      g_staticEntryPrice = activeSafeEntry;
-      g_staticSL = activeSafeSL;
-      // SYSTEM-LEVEL STRUCTURAL STOP LOSS:
-      // Evaluates Order Block floor/ceiling and allows multi-day swing low/high as safest anchor!
-      if(g_staticSL <= 0.0)
-      {
-         double obL = (g_obSignalLow > 0.0) ? g_obSignalLow : 0.0;
-         double obH = (g_obSignalHigh > 0.0) ? g_obSignalHigh : 0.0;
-         g_staticSL = GetSafestStructuralStopLoss(sym, activeTradeDir, g_staticEntryPrice, obL, obH, curAtr, false);
-         if(g_staticSL <= 0.0) { g_hasViableEntry = false; g_blockReason = "WAITING FOR STRUCTURAL HISTORY"; return; }
-      }
-      long stopLevel = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
-      double minStopDist = (double)stopLevel * pt;
-      if(minStopDist < pt) minStopDist = pt;
-      double minSafeDistActive = MathMax(minStopDist + 2.0 * pt, MathMax(18.0 * pip, 0.40 * curAtr));
-      if(g_staticSL <= 0.0)
-      {
-         g_staticSL = (activeTradeDir == "BUY") ? (g_staticEntryPrice - minSafeDistActive) : (g_staticEntryPrice + minSafeDistActive);
-         g_staticSL = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticSL), digits);
-      }
-      g_staticTP1 = activeSafeTP1;
-      g_staticTP2 = activeSafeTP2;
-      g_staticTP3 = activeSafeTP3;
-      g_staticTP4 = activeSafeTP4;
-
-      g_hasViableEntry = true;
-      g_currentTradeTaken = true;
-      g_isGateOpen = true;
-
-      // Check if price returned to and bounced off the safe trade zone
-      if(!isInsideSafeZone)
-      {
-         // Price is extended away from safe zone (e.g. at 4381 vs safe entry 4342) - strictly block secondary entries!
-         g_setupState = "TRIGGERED";
-         g_primaryRejectionReason = StringFormat("DISCIPLINE: Active safe %s trade running @ %s (%d leg(s)). Do not take less safe trades. Price extended by %.1f pips.",
-                                                 activeTradeDir, DoubleToString(activeSafeEntry, digits), openSafeCount, distFromSafeEntry / pip);
-         g_blockReason = g_primaryRejectionReason;
-         g_signalStatusLabel = StringFormat("POSITION ACTIVE: %s [%d Open @ %s | Monitoring]", activeTradeDir, openSafeCount, DoubleToString(activeSafeEntry, digits));
-         UpdateTradeAdviceLines();
-         return;
-      }
-      else
-      {
-         // Price has returned to the safe trade zone! Check for confirmed bounce on M5/M15
-         bool confirmedBounce = CheckConfirmedSafeZoneBounce(sym, activeTradeDir, activeSafeEntry);
-         if(!confirmedBounce)
-         {
-            g_setupState = "WATCHING";
-            g_primaryRejectionReason = StringFormat("RETURNING TO SAFE ZONE: Price at %s (near safe entry %s). Awaiting confirmed bounce before considering additional entry.",
-                                                    DoubleToString(curPrice, digits), DoubleToString(activeSafeEntry, digits));
-            g_blockReason = g_primaryRejectionReason;
-            g_signalStatusLabel = StringFormat("TESTING SAFE ZONE @ %s (AWAITING BOUNCE)", DoubleToString(activeSafeEntry, digits));
-            UpdateTradeAdviceLines();
-            return;
-         }
-         else
-         {
-            // Confirmed bounce off safe zone! Check portfolio ceiling
-            int openAdvTrades = CountTotalOpenAdvisorTrades();
-            int portfolioCeiling = MathMax(24, InpMaxOpenAdvisorTradesPortfolio);
-            if(openAdvTrades >= portfolioCeiling || openSafeCount >= InpAdvisorMaxTradesPerSetup)
-            {
-               g_setupState = "TRIGGERED";
-               g_primaryRejectionReason = StringFormat("SAFE ZONE BOUNCE CONFIRMED but max trades reached (%d/%d). Position active.", openSafeCount, InpAdvisorMaxTradesPerSetup);
-               g_blockReason = g_primaryRejectionReason;
-               g_signalStatusLabel = StringFormat("SAFE BOUNCE @ %s (MAX TRADES REACHED)", DoubleToString(activeSafeEntry, digits));
-               UpdateTradeAdviceLines();
-               return;
-            }
-            // Allow re-entry at safe zone only!
-            g_setupState = "READY";
-            g_signalStatusLabel = StringFormat("SAFE ZONE RETEST BOUNCE CONFIRMED @ %s", DoubleToString(activeSafeEntry, digits));
-            g_primaryRejectionReason = "Safe zone retest bounce confirmed. Ready for addition.";
-            g_blockReason = "";
-            UpdateTradeAdviceLines();
-            return;
-         }
-      }
-   }
+   // Existing setups are managed separately by broker ticket / setup identity.
+   // Continue scanning a fresh setup while capacity is available.
 
    static datetime s_lastSubScanTime = 0;
 
    // CRITICAL PULLBACK & RETEST ARRIVAL TRIGGER:
    // If a planned entry or order block retest level is waiting (e.g. in WATCHING state),
    // first evaluate viability in real-time. If price has moved adverse or breached limits, CANCEL IMMEDIATELY!
-   if(g_staticEntryPrice > 0.0 && g_staticSL > 0.0 && CountOpenAdvisorTradesForSymbol(sym) == 0)
+   if(g_staticEntryPrice > 0.0 && g_staticSL > 0.0 && !HasOpenAdvisorTradesForSignal(sym,g_currentSignalID))
    {
       double curBidCheck = SymbolInfoDouble(sym, SYMBOL_BID);
       double curAskCheck = SymbolInfoDouble(sym, SYMBOL_ASK);
@@ -10422,7 +10378,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          }
       }
 
-      if((isTouched || isTouchingOB) && CountOpenAdvisorTradesForSymbol(sym) == 0)
+      if((isTouched || isTouchingOB) && !HasOpenAdvisorTradesForSignal(sym,g_currentSignalID))
       {
          double triggeredPrice = isTouchingOB ? obLevel : (isTouched ? g_staticEntryPrice : curPrice);
          PrintFormat("[Trade Advisor] >>> VIABLE ORDER BLOCK / PULLBACK TOUCH TRIGGERED on %s: Price reached %s level %s (%s)! Promoting immediately to TRIGGERED for execution.",
@@ -10451,7 +10407,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
       if(curPrice <= 0.0) curPrice = iClose(sym, PERIOD_H1, 0);
 
       // Check if position is open and taken in market
-      if(CountOpenAdvisorTradesForSymbol(sym) > 0)
+      if(HasOpenAdvisorTradesForSignal(sym,g_currentSignalID))
       {
          if((g_currentAdvisedAction == "BUY" && curPrice <= g_staticSL) ||
             (g_currentAdvisedAction == "SELL" && curPrice >= g_staticSL))
@@ -10486,7 +10442,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          else
          {
             // Signal is still viable and waiting for entry
-            if(CountOpenAdvisorTradesForSymbol(sym) == 0)
+            if(!HasOpenAdvisorTradesForSignal(sym,g_currentSignalID))
             {
                g_currentTradeTaken = false;
                g_setupState = "READY";
@@ -10517,7 +10473,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
 
    // STALE SIGNAL TREND-REVERSAL INVALIDATION GUARD:
    // If market trend has reversed across H1/H2/H4, immediately purge any opposing stale signal and pivot!
-   if(CountOpenAdvisorTradesForSymbol(sym) == 0 && g_hasViableEntry)
+   if(!HasOpenAdvisorTradesForSignal(sym,g_currentSignalID) && g_hasViableEntry)
    {
       if(g_currentAdvisedAction == "SELL" && (h1Bull && (h2Bull || h4Bull)))
       {
@@ -10888,7 +10844,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
                      sym, candEntry, candSL);
          UpdateTradeAdviceLines();
          if(g_showSentimentHUD) DrawSentimentHUD();
-         if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+         if(g_myAdvisorEnabled && !HasOpenAdvisorTradesForSignal(sym,g_currentSignalID))
          {
             CheckAndAutoTradeAdvice();
          }
@@ -11050,7 +11006,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
                      sym, candEntry, candSL);
          UpdateTradeAdviceLines();
          if(g_showSentimentHUD) DrawSentimentHUD();
-         if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+         if(g_myAdvisorEnabled && !HasOpenAdvisorTradesForSignal(sym,g_currentSignalID))
          {
             CheckAndAutoTradeAdvice();
          }
@@ -11353,7 +11309,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             g_primaryRejectionReason = "NONE (VIABLE ORDER BLOCK ENTERED - EXECUTING)";
             g_blockReason = "NONE (LEVEL TOUCHED)";
             UpdateTradeAdviceLines();
-            if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+            if(g_myAdvisorEnabled && !HasOpenAdvisorTradesForSignal(sym,g_currentSignalID))
             {
                CheckAndAutoTradeAdvice();
             }
@@ -12073,7 +12029,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             UpdateTradeAdviceLines();
             SaveActiveSignalSnapshot(sym);
 
-            if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+            if(g_myAdvisorEnabled && !HasOpenAdvisorTradesForSignal(sym,g_currentSignalID))
             {
                CheckAndAutoTradeAdvice();
             }
@@ -12300,7 +12256,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
             UpdateTradeAdviceLines();
             SaveActiveSignalSnapshot(sym);
 
-            if(g_myAdvisorEnabled && CountOpenAdvisorTradesForSymbol(sym) == 0)
+            if(g_myAdvisorEnabled && !HasOpenAdvisorTradesForSignal(sym,g_currentSignalID))
             {
                CheckAndAutoTradeAdvice();
             }
@@ -12823,8 +12779,8 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
 bool RollbackAdvisorSetup(string shortSig, string signalID, const ulong &tickets[], int maxLegs)
 {
    string advSetupPrefix = StringFormat("SEGS|ADV|%s|", shortSig);
-   string sigExecKey = "SEGS_SIG_EXEC_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + signalID;
-   string pendingTimeKey = "SEGS_SIG_PENDING_TIME_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + signalID;
+   string sigExecKey = SEGSExecutionKey(signalID,false);
+   string pendingTimeKey = SEGSExecutionKey(signalID,true);
 
    PrintFormat("[Advisor Rollback] Initiating verified rollback for setup %s (%s)...", advSetupPrefix, signalID);
 
@@ -13368,13 +13324,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       return;
    }
 
-   if(CountOpenAdvisorTradesForSymbol(sym) > 0)
-   {
-      string msg = "[Trade Advisor] EXECUTION BLOCKED: An active advisor position is already running on " + sym;
-      Print(msg);
-      if(!isAutoTrade) Alert(msg);
-      return;
-   }
+   if(!SEGSCanScanNewSetup(sym)) { g_blockReason="INSTRUMENT SETUP LIMIT REACHED"; return; }
 
    // 3. Instrument Tradability Verification
    string tradableReason = "";
@@ -13386,6 +13336,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       return;
    }
 
+   if(!SEGSEnsureCandidateIdentity(sym)) return;
    string entryGateReason="";
    if(!SEGSAdvisorEntryGate(sym,g_currentAdvisedAction,g_staticEntryPrice,g_staticSL,true,entryGateReason))
    {
@@ -13427,13 +13378,8 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       ArraySetAsSeries(atrBuf, true);
       if(CopyBuffer(g_hAtr_H1, 0, 1, 1, atrBuf) == 1) curAtr = atrBuf[0];
    }
-   if(curAtr <= 0.0)
-   {
-      double h1 = iHigh(sym, PERIOD_H1, 1);
-      double l1 = iLow(sym, PERIOD_H1, 1);
-      if(h1 > l1) curAtr = h1 - l1;
-      else curAtr = 25.0 * GetPipSize(sym);
-   }
+   if(!MathIsValidNumber(curAtr) || curAtr<=0)
+   { g_blockReason="WAITING FOR CLOSED H1 ATR"; return; }
 
    double pip = GetPipSize(sym);
    double spreadPtsExec = (double)SymbolInfoInteger(sym, SYMBOL_SPREAD) * SymbolInfoDouble(sym, SYMBOL_POINT);
@@ -13502,7 +13448,8 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    }
 
    // 7. Prevent Duplicate Signal Execution
-   string sigExecKey = "SEGS_SIG_EXEC_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + g_currentSignalID;
+   string sigExecKey = SEGSExecutionKey(g_currentSignalID,false);
+   if(GlobalVariableCheck(sigExecKey) && GlobalVariableGet(sigExecKey)>=2.0) return;
    if(HasOpenAdvisorTradesForSignal(sym, g_currentSignalID))
    {
       PrintFormat("[Trade Advisor] EXECUTION BLOCKED: Signal %s has already been executed.", g_currentSignalID);
@@ -13545,6 +13492,9 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       return;
    }
 
+   if(!SEGSCanScanNewSetup(sym) || HasOpenAdvisorTradesForSignal(sym,g_currentSignalID) ||
+      (GlobalVariableCheck(sigExecKey) && GlobalVariableGet(sigExecKey)>=2.0))
+   { ReleaseAccountLock("ADVISOR_EXEC"); return; }
    int currentOpenTrades = CountTotalOpenAdvisorTrades();
    int availableSlots = portfolioCeiling - currentOpenTrades;
    if(availableSlots <= 0)
@@ -13609,16 +13559,18 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    double minStopDist = MathMax((double)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL) * pt, pt);
    double pipSize = GetPipSize(sym);
    double minSafeStopDist = MathMax(minStopDist + 2.0 * pt, 0.15 * curAtr);
-   bool stopOB = g_obSignalDirection == g_currentAdvisedAction;
-   double finalStop = GetSafestStructuralStopLoss(sym, g_currentAdvisedAction, curPrice,
-      stopOB ? g_obSignalLow : 0.0, stopOB ? g_obSignalHigh : 0.0, curAtr, !stopOB);
+   double finalStop = GetSafestStructuralStopLoss(sym,g_currentAdvisedAction,curPrice,
+      g_executionZoneLow,g_executionZoneHigh,curAtr);
    if(finalStop <= 0.0)
    {
-      g_blockReason = "WAITING FOR VALID STRUCTURAL STOP ANCHOR";
+      g_blockReason = "NO STRUCTURAL STOP FITS THE SYSTEM DISTANCE CAP";
       ReleaseAccountLock("ADVISOR_EXEC");
       return;
    }
    g_staticSL = finalStop;
+   PrintFormat("[SEGS STOP POLICY] %s %s | %s | SL=%.8f | distance=%.8f | H1 ATR=%.8f | cap=%.8f",
+      sym,g_currentAdvisedAction,(g_executionZoneLow>0 && g_systemStopStyle!=SL_STYLE_MULTI_DAY) ? "ENTRY OB WICK" : "INSTITUTIONAL",
+      finalStop,MathAbs(curPrice-finalStop),curAtr,SEGSStopLimit(curPrice,curAtr));
 
    double totalLot = 0.0;
    if(g_smartLotEnabled)
@@ -13704,7 +13656,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
 
    // 13. Mark Pending Execution State & Persist Targets in Global Variables BEFORE Placing
    GlobalVariableSet(sigExecKey, 1.0);
-   string pendingTimeKey = "SEGS_SIG_PENDING_TIME_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + g_currentSignalID;
+   string pendingTimeKey = SEGSExecutionKey(g_currentSignalID,true);
    GlobalVariableSet(pendingTimeKey, (double)TimeCurrent());
 
    string shortSig = SEGSShortSignalID(g_currentSignalID);
@@ -13757,7 +13709,8 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       // Pre-validate SL and TP levels against current live price to ensure zero invalid stop rejections
       double legSL = g_staticSL;
       double legTP = targetTP;
-      if(legSL <= 0.0 || !ValidateProtectionLevels(sym, ptype, sendPrice, legSL, legTP))
+      if(legSL <= 0.0 || !ValidateProtectionLevels(sym, ptype, sendPrice, legSL, legTP) ||
+         MathAbs(sendPrice-legSL)>SEGSStopLimit(sendPrice,curAtr))
       {
          PrintFormat("[SEGS EXEC] Leg %d deferred: protection not valid at live quote", leg + 1);
          continue;
@@ -13780,7 +13733,8 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
          sendPrice = (g_currentAdvisedAction == "BUY") ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID);
          legSL = g_staticSL;
          legTP = targetTP;
-         if(legSL <= 0.0 || !ValidateProtectionLevels(sym, ptype, sendPrice, legSL, legTP))
+         if(legSL <= 0.0 || !ValidateProtectionLevels(sym, ptype, sendPrice, legSL, legTP) ||
+         MathAbs(sendPrice-legSL)>SEGSStopLimit(sendPrice,curAtr))
       {
          PrintFormat("[SEGS EXEC] Leg %d deferred: protection not valid at live quote", leg + 1);
          continue;
@@ -13957,11 +13911,7 @@ void CheckAndAutoTradeAdvice()
    }
 
    // 4. Must have an unexecuted viable setup
-   if(CountOpenAdvisorTradesForSymbol(_Symbol) > 0)
-   {
-      g_currentTradeTaken = true;
-      return;
-   }
+   if(!SEGSCanScanNewSetup(_Symbol) || HasOpenAdvisorTradesForSignal(_Symbol,g_currentSignalID)) return;
    g_currentTradeTaken = false;
    // 4B. Mandatory Pre-Execution Viability Check:
    // Prevents executing stale waiting planned entries upon circuit breaker release unless still strictly viable
@@ -13986,6 +13936,7 @@ void CheckAndAutoTradeAdvice()
       return;
    }
 
+   if(!SEGSEnsureCandidateIdentity(_Symbol)) return;
    string finalGateReason="";
    if(!SEGSAdvisorEntryGate(_Symbol,g_currentAdvisedAction,g_staticEntryPrice,g_staticSL,true,finalGateReason))
    {
@@ -13995,11 +13946,7 @@ void CheckAndAutoTradeAdvice()
    }
 
    // 5. Anti-Repeat Protection: Ensure no active trade is running for this symbol
-   if(CountOpenAdvisorTradesForSymbol(_Symbol) > 0)
-   {
-      g_currentTradeTaken = true;
-      return;
-   }
+   if(!SEGSCanScanNewSetup(_Symbol) || HasOpenAdvisorTradesForSignal(_Symbol,g_currentSignalID)) return;
 
    // 6. Portfolio exposure limit (strictly respects the full configured ceiling, e.g. 16)
    int portfolioCeiling = MathMax(24, InpMaxOpenAdvisorTradesPortfolio);
@@ -14011,22 +13958,15 @@ void CheckAndAutoTradeAdvice()
    }
 
    // 7. Check if signal execution key is completed
-   string sigExecKey = "SEGS_SIG_EXEC_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + g_currentSignalID;
+   string sigExecKey = SEGSExecutionKey(g_currentSignalID,false);
    if(GlobalVariableCheck(sigExecKey))
    {
       double state = GlobalVariableGet(sigExecKey);
       if(state >= 2.0)
       {
-         if(CountOpenAdvisorTradesForSymbol(_Symbol) > 0)
-         {
-            g_currentTradeTaken = true;
-            return;
-         }
-         else
-         {
-            GlobalVariableDel(sigExecKey);
-            g_currentTradeTaken = false;
-         }
+         // A completed/aborted/consumed setup is never re-executed, even after its positions close.
+         g_currentTradeTaken=true;
+         return;
       }
       else if(state == 1.0)
       {
@@ -14055,7 +13995,7 @@ void CheckAndAutoTradeAdvice()
          {
             // Stale or failed attempt: remove pending lock so trade executes immediately!
             GlobalVariableDel(sigExecKey);
-            string pendingTimeKey = "SEGS_SIG_PENDING_TIME_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + g_currentSignalID;
+            string pendingTimeKey = SEGSExecutionKey(g_currentSignalID,true);
             GlobalVariableDel(pendingTimeKey);
          }
       }
@@ -15769,7 +15709,7 @@ void DrawSentimentHUD()
    int c3Y = c2Y + 50;
    int c3H = 92;
    CreateOrUpdatePanel(PREFIX + "SNT_C3_BG", sx + 8, c3Y, cardW, c3H, C'14,18,28', C'28,40,62', CORNER_LEFT_UPPER);
-   CreateOrUpdateCell(PREFIX + "SNT_C3_H", sx + 14, c3Y + 4, "TRADE SETUP & EXECUTION (4 EQUAL 25% LEGS)", clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Arial Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_C3_H", sx + 14, c3Y + 4, StringFormat("ADVISOR: %d/%d OPEN SETUPS | NEW SETUP: 4 LEGS",CountOpenAdvisorSetsForSymbol(sym),MathMax(1,InpMaxSetsPerSymbol)), clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Arial Bold");
 
    int btnAdvW = 126;
    int btnAdvX = sx + cardW - btnAdvW - 8;
@@ -15785,7 +15725,7 @@ void DrawSentimentHUD()
    CheckCircuitBreaker(sym, cbBlocked, cbReason, cbConsec, cbTotal);
 
    int openLegs = CountOpenAdvisorTradesForSymbol(sym);
-   bool isTradeTaken = (openLegs > 0);
+   bool isTradeTaken = HasOpenAdvisorTradesForSignal(sym,g_currentSignalID);
 
    datetime execDt = 0;
    if(isTradeTaken)
@@ -15901,15 +15841,6 @@ void DrawSentimentHUD()
 
       string lvlLabel = isTradeTaken ? "ACTIVE ENTRY" : "PLANNED ENTRY";
       double dispSL = g_staticSL;
-      double ptHUD = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-      if(ptHUD <= 0.0) ptHUD = 0.0001;
-      double pipHUD = GetPipSize(_Symbol);
-      double minSafeDistHUD = MathMax(18.0 * pipHUD, 0.40 * 20.0 * pipHUD);
-      if(dispSL <= 0.0 || MathAbs(dispSL - g_staticEntryPrice) < minSafeDistHUD)
-      {
-         dispSL = (g_currentAdvisedAction == "BUY") ? (g_staticEntryPrice - minSafeDistHUD) : (g_staticEntryPrice + minSafeDistHUD);
-         dispSL = NormalizeDouble(NormalizePriceToTickSize(_Symbol, dispSL), symDigits);
-      }
       string lvlStr = StringFormat("%s: %s  |  SL: %s",
          lvlLabel,
          DoubleToString(g_staticEntryPrice, symDigits),
@@ -16187,7 +16118,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.79", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.80", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {

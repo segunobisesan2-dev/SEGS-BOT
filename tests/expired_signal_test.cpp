@@ -30,12 +30,13 @@ string g_primaryRejectionReason = "";
 string g_signalStatusLabel = "SCANNING FOR NEW OPPORTUNITY";
 int openPositions=0,clears=0,deletes=0;
 int CountOpenAdvisorTradesForSymbol(string){return openPositions;}
+bool HasOpenAdvisorTradesForSignal(string,string signal){return openPositions>0 && signal=="LIVE_POSITION";}
 void ClearActiveSignalSnapshot(string){clears++;}
 void DeleteTradeAdviceLines(){deletes++;}
 void PrintFormat(const char*,string){}
 bool SEGSResetExpiredSetup(string sym)
 {
-   if(CountOpenAdvisorTradesForSymbol(sym) > 0) return false;
+   if(HasOpenAdvisorTradesForSignal(sym,g_currentSignalID)) return false;
    if(!g_isSignalExpired && g_setupState != "EXPIRED" && g_setupState != "INVALIDATED" && g_setupState != "CANCELLED") return false;
    g_isSignalExpired = false;
    g_hasViableEntry = false;
@@ -62,6 +63,7 @@ bool SEGSResetExpiredSetup(string sym)
    PrintFormat("[SEGS SIGNAL RESET] %s expired setup cleared; fresh opportunity scan enabled", sym);
    return true;
 }
+
 int main(){
  g_isSignalExpired=true;g_setupState="EXPIRED";g_currentSignalID="STALE_USDCHF";g_staticEntryPrice=.8326;g_currentTradeTaken=true;
  assert(SEGSResetExpiredSetup("USDCHF"));assert(!g_isSignalExpired&&!g_currentTradeTaken&&!g_hasViableEntry);
@@ -71,4 +73,6 @@ int main(){
  assert(!SEGSResetExpiredSetup("USDCHF"));assert(g_isSignalExpired&&g_currentSignalID=="LIVE_POSITION"&&clears==1);
  openPositions=0;g_isSignalExpired=false;g_setupState="CANCELLED";
  assert(SEGSResetExpiredSetup("USDCHF"));assert(g_setupState=="SCANNING"&&g_currentSignalID.empty());
+ openPositions=1;g_currentSignalID="DIFFERENT_EXPIRED_CANDIDATE";g_isSignalExpired=true;g_setupState="EXPIRED";
+ assert(SEGSResetExpiredSetup("USDCHF"));assert(openPositions==1&&g_currentSignalID.empty());
 }
