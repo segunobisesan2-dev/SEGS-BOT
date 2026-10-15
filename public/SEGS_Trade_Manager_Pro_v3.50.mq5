@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.75.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.77.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.75 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.77 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.75"
+#property version   "3.77"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -187,7 +187,7 @@ input double           InpDJ30_TP3_Pips       = 264.0;                // DJ30 Le
 input double           InpDJ30_TP4_Pips       = 440.0;                // DJ30 Leg 4 TP4 (Pips, 8.00R Macro Golden Runner)
 
 // NAS100 / US100 Targets (In Pips)
-input string           InpNAS_Patterns        = "NAS100,US100,USTEC,NDX,NQ100,NAS,NDAQ,NDAQ100,US100Cash"; // NAS100 & NDAQ symbol keywords
+input string           InpNAS_Patterns        = "NAS100,US100,USTEC,NDX,NQ100,NAS,NDAQ100,US100Cash"; // NAS100 & NDAQ symbol keywords
 input double           InpNAS_PipMultiplier   = 1.0;                  // NAS100 1 Pip Value in Price (1.0 index point)
 input double           InpNAS_SL_Pips         = 35.0;                 // NAS100 Stop Loss (Pips)
 input double           InpNAS_TP1_Pips        = 49.0;                 // NAS100 Leg 1 TP1 (Pips, 1.40R FTA)
@@ -408,7 +408,7 @@ input double               InpLiquiditySweepToleranceATR  = 0.35;             //
 input bool                 InpAutoMapTP3ToOpposingLiquidity = true;           // Map Leg 3 (TP3) to opposing PDH/PDL liquidity (within 2-3 day reach)
 input group "=== [M30 Stop Loss Recovery: 1-Hour Order Block Elevation] ==="
 input bool                 InpElevateToH1OnM30SL          = true;             // If M30 OB hits Stop Loss, bypass next M30 OB and enter at 1H OB
-input double               InpNDAQ_H1_DemandAnchor        = 93.42;            // Calibrated NDAQ 1-Hour Demand Order Block Anchor (from chart)
+input double               InpNDAQ_H1_DemandAnchor        = 0.0;            // Legacy compatibility input; live H1 zones are derived from market history
 input int                  InpH1OBMaxActiveZones          = 6;                // Max active 1-Hour Order Blocks to track
 
 input group "=== [Trend Reversal & Directional Confluence Protection] ==="
@@ -941,7 +941,26 @@ void SEGSSyncStopSettings(bool publish=false)
 
 input double InpStructuralBufferATR = 0.20;
 input double InpDualProximityATR = 0.85;
+struct SEGSHistoryRecord
+{
+   string key;
+   string symbol;
+   double pnl;
+   double volume;
+   datetime exitTime;
+   bool hasEntry;
+   bool hasExit;
+   bool complete;
+};
+SEGSHistoryRecord g_historySetups[];
+bool g_historyDirty = true;
+bool g_historyValid = false;
+ulong g_historyNextRefresh = 0;
+long g_historyAccount = 0;
+
+
 bool g_runtimeReady = false;
+bool g_quoteRecoveryPending = true;
 
 // Readiness is checked again on every event; missing history never detaches the EA.
 bool SEGSMarketReady(string sym)
@@ -959,8 +978,10 @@ bool SEGSEnsureRuntimeReady()
 {
    if(!SEGSMarketReady(_Symbol)) return false;
    static ulong nextRetryMs = 0;
+   static bool lastCheckReady = false;
    ulong now = GetTickCount64();
-   if(!g_runtimeReady && now < nextRetryMs) return false;
+   if(now < nextRetryMs) return lastCheckReady;
+   lastCheckReady = false;
    nextRetryMs = now + 1000;
    SEGSSyncStopSettings();
    InitIndicatorHandles(_Symbol);
@@ -988,7 +1009,41 @@ bool SEGSEnsureRuntimeReady()
       Comment("");
       PrintFormat("[SEGS READY] Market metadata available on %s", _Symbol);
    }
+   lastCheckReady = true;
    return true;
+}
+
+// Quote time belongs to this symbol; TimeCurrent alone can advance on other symbols.
+bool SEGSQuoteFresh(string sym)
+{
+   MqlTick quote;
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED) || !SymbolInfoTick(sym,quote) || quote.time<=0) return false;
+   datetime now=TimeTradeServer();
+   if(now<=0) now=TimeCurrent();
+   long age=(long)now-(long)quote.time;
+   return age>=-5 && age<=120 && SEGSMarketReady(sym);
+}
+
+bool SEGSServiceDataStatus()
+{
+   bool ready=SEGSEnsureRuntimeReady();
+   bool fresh=ready && SEGSQuoteFresh(_Symbol);
+   if(fresh)
+   {
+      ObjectDelete(0,PREFIX+"DATA_STATUS");
+      return true;
+   }
+   g_quoteRecoveryPending=true;
+   string status=ready ? "STALE / NO LIVE QUOTE - cached levels; new entries paused" : "WAITING FOR SYNCHRONIZED HISTORY - cached display";
+   string name=PREFIX+"DATA_STATUS";
+   if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,12);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,16);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clrTomato);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,11);
+   ObjectSetString(0,name,OBJPROP_TEXT,_Symbol+": "+status);
+   return ready;
 }
 
 int OnInit()
@@ -996,7 +1051,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.75 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.77 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1083,7 +1138,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.75 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.77 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -1290,7 +1345,8 @@ void SEGSCalibrateActiveZoneProtection()
 
 void RunAdvisorStrategyEngine(bool forceScan, bool allowAutoTrade)
 {
-   if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
+   if(!g_runtimeReady || !SEGSQuoteFresh(_Symbol)) return;
+   forceScan = forceScan || g_quoteRecoveryPending;
    static ulong nextScanMs = 0;
    ulong scanNowMs = GetTickCount64();
    if(!forceScan && scanNowMs < nextScanMs) return;
@@ -1306,27 +1362,28 @@ void RunAdvisorStrategyEngine(bool forceScan, bool allowAutoTrade)
    SEGSCalibrateActiveZoneProtection();
    UpdateOBLocationSnapshot(_Symbol);
    UpdateH1OBLocationSnapshot(_Symbol);
+   g_quoteRecoveryPending=false;
    if(allowAutoTrade)
       CheckAndAutoTradeAdvice();
 }
 
 void OnTick()
 {
-   if(!SEGSEnsureRuntimeReady()) return;
+   if(!SEGSServiceDataStatus()) return;
    GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 1.0);
    EnforcePositionStopLossAndTargets();
    CheckBreakevenConditions();
    CheckTrailingClose();
    HealOpenAdvisorPositions(_Symbol);
 
-   if(g_currentMode == MODE_COMPLETE_AUTO)
+   if(g_currentMode == MODE_COMPLETE_AUTO && SEGSQuoteFresh(_Symbol))
       ProcessUnassignedPositions();
 
    // Independent Strategy Evaluation on Tick
    RunAdvisorStrategyEngine(false, true);
 
    ulong nowMs = GetTickCount64();
-   if(nowMs - g_lastTickUpdateTime >= 200)
+   if(nowMs - g_lastTickUpdateTime >= 1000)
    {
       g_lastTickUpdateTime = nowMs;
       DrawUnifiedTerminalDashboard();
@@ -1340,7 +1397,7 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-   if(!SEGSEnsureRuntimeReady()) return;
+   if(!SEGSServiceDataStatus()) return;
    // 1. Maintain Chart Heartbeat and ensure chart keyboard messages route to EA
    long myChartId = ChartID();
    GlobalVariableSet("SEGS_HB_" + IntegerToString(myChartId), (double)TimeCurrent());
@@ -1393,6 +1450,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
+   g_historyDirty = true;
+   g_historyNextRefresh = 0;
    if(!g_runtimeReady) return; // Startup reconstruction recovers trades once history is ready.
    // 1. Detect new DEAL_ADD (Market position filled or closed)
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
@@ -1420,17 +1479,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
          if(isAdvisor)
          {
             PrintFormat("[SEGS PRO] Advisor position #%I64u on %s closed (Deal #%I64u). Registering closure and applying manual close protection lockout.", posId, sym, deal);
-            string cleanSym = sym;
-            StringToUpper(cleanSym);
-            if(IsSymbolMatch(cleanSym, InpXAU_Patterns))       cleanSym = "XAUUSD";
-            else if(IsSymbolMatch(cleanSym, InpDJ30_Patterns)) cleanSym = "US30";
-            else if(IsSymbolMatch(cleanSym, InpNAS_Patterns))  cleanSym = "NAS100";
-            else if(IsSymbolMatch(cleanSym, InpGJ_Patterns))   cleanSym = "GBPJPY";
-            else if(IsSymbolMatch(cleanSym, InpGU_Patterns))   cleanSym = "GBPUSD";
-            else if(IsSymbolMatch(cleanSym, InpAUD_Patterns))  cleanSym = "AUDUSD";
-            else if(IsSymbolMatch(cleanSym, InpOIL_Patterns))  cleanSym = "USOIL";
-            else if(IsSymbolMatch(cleanSym, InpBTC_Patterns))  cleanSym = "BTCUSD";
-            else if(IsSymbolMatch(cleanSym, InpAMD_Patterns))  cleanSym = "AMD";
+            string cleanSym = SEGSInstrumentKey(sym);
 
             string gvCdKey = "SEGS_COOLDOWN_" + cleanSym + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
              GlobalVariableSet(gvCdKey, (double)(TimeCurrent() + 15)); // 15-second anti-spam cooldown
@@ -1794,6 +1843,8 @@ string DetectAssetType(string sym)
    string upper = sym;
    StringToUpper(upper);
 
+   if(StringFind(upper, "NDAQ100") >= 0) return "NAS100";
+
    // Nasdaq Disambiguation:
    // If broker symbol contains NDAQ:
    // If current price > 1000.0: it is the Nasdaq-100 Index CFD (trading at ~21,000 points)
@@ -1828,17 +1879,40 @@ string DetectAssetType(string sym)
 //+------------------------------------------------------------------+
 //| Check if trade symbol matches the active chart asset             |
 //+------------------------------------------------------------------+
+string SEGSInstrumentKey(string sym)
+{
+   string upper=sym; StringToUpper(upper);
+   string category=DetectAssetType(sym);
+   if(category=="AMD")
+   {
+      string tickers[] = {"NDAQ","AMD","AAPL","MSFT","NVDA","TSLA","AMZN","META","GOOGL","GOOG"};
+      for(int i=0; i<ArraySize(tickers); i++)
+         if(StringFind(upper,tickers[i])>=0) return tickers[i];
+      return upper;
+   }
+   if(category=="XAU") return "XAUUSD";
+   if(category=="DJ30") return "US30";
+   if(category!="FOREX") return category;
+   return upper;
+}
+
 bool IsSameChartAsset(string symA, string symB)
 {
-   if(symA == symB) return true;
-   string a = symA; StringToUpper(a);
-   string b = symB; StringToUpper(b);
-   if(a == b) return true;
-   if(StringFind(a, b) >= 0 || StringFind(b, a) >= 0) return true;
-   string catA = DetectAssetType(symA);
-   string catB = DetectAssetType(symB);
-   if(catA != "FOREX" && catA == catB) return true;
-   return false;
+   if(symA == "" || symB == "") return false;
+   string a=symA; StringToUpper(a);
+   string b=symB; StringToUpper(b);
+   if(a==b) return true;
+   string catA=DetectAssetType(symA), catB=DetectAssetType(symB);
+   if(catA=="AMD" || catB=="AMD")
+   {
+      if(catA!=catB) return false;
+      string tickers[] = {"NDAQ","AMD","AAPL","MSFT","NVDA","TSLA","AMZN","META","GOOGL","GOOG"};
+      for(int i=0; i<ArraySize(tickers); i++)
+         if(StringFind(a,tickers[i])>=0 && StringFind(b,tickers[i])>=0) return true;
+      return false;
+   }
+   if(StringFind(a,b)>=0 || StringFind(b,a)>=0) return true;
+   return catA!="FOREX" && catA==catB;
 }
 
 //+------------------------------------------------------------------+
@@ -2791,17 +2865,7 @@ bool SafePositionClose(ulong ticket, string reason = "MANUAL_CLOSE")
    // Register manual close cooldown so advisor never immediately reopens trade on user!
    if(closed || !posInfo.SelectByTicket(ticket))
    {
-      string cleanSym = sym;
-      StringToUpper(cleanSym);
-      if(IsSymbolMatch(cleanSym, InpXAU_Patterns))       cleanSym = "XAUUSD";
-      else if(IsSymbolMatch(cleanSym, InpDJ30_Patterns)) cleanSym = "US30";
-      else if(IsSymbolMatch(cleanSym, InpNAS_Patterns))  cleanSym = "NAS100";
-      else if(IsSymbolMatch(cleanSym, InpGJ_Patterns))   cleanSym = "GBPJPY";
-      else if(IsSymbolMatch(cleanSym, InpGU_Patterns))   cleanSym = "GBPUSD";
-      else if(IsSymbolMatch(cleanSym, InpAUD_Patterns))  cleanSym = "AUDUSD";
-      else if(IsSymbolMatch(cleanSym, InpOIL_Patterns))  cleanSym = "USOIL";
-      else if(IsSymbolMatch(cleanSym, InpBTC_Patterns))  cleanSym = "BTCUSD";
-      else if(IsSymbolMatch(cleanSym, InpAMD_Patterns))  cleanSym = "AMD";
+      string cleanSym = SEGSInstrumentKey(sym);
 
       long login = AccountInfoInteger(ACCOUNT_LOGIN);
       string gvCdKey = "SEGS_COOLDOWN_" + cleanSym + "_" + IntegerToString(login);
@@ -13291,17 +13355,7 @@ void CheckCircuitBreaker(string sym, bool &outBlocked, string &outReason, int &o
 
    if(!InpEnableCircuitBreaker) return;
 
-   string cleanSym = sym;
-   StringToUpper(cleanSym);
-   if(IsSymbolMatch(cleanSym, InpXAU_Patterns))       cleanSym = "XAUUSD";
-   else if(IsSymbolMatch(cleanSym, InpDJ30_Patterns)) cleanSym = "US30";
-   else if(IsSymbolMatch(cleanSym, InpNAS_Patterns))  cleanSym = "NAS100";
-   else if(IsSymbolMatch(cleanSym, InpGJ_Patterns))   cleanSym = "GBPJPY";
-   else if(IsSymbolMatch(cleanSym, InpGU_Patterns))   cleanSym = "GBPUSD";
-   else if(IsSymbolMatch(cleanSym, InpAUD_Patterns))  cleanSym = "AUDUSD";
-   else if(IsSymbolMatch(cleanSym, InpOIL_Patterns))  cleanSym = "USOIL";
-   else if(IsSymbolMatch(cleanSym, InpBTC_Patterns))  cleanSym = "BTCUSD";
-   else if(IsSymbolMatch(cleanSym, InpAMD_Patterns))  cleanSym = "AMD";
+   string cleanSym = SEGSInstrumentKey(sym);
 
    long login = AccountInfoInteger(ACCOUNT_LOGIN);
    string gvPortfolioKey = "SEGS_CB_PORTFOLIO_PAUSED_" + IntegerToString(login);
@@ -13474,17 +13528,7 @@ void CheckCircuitBreaker(string sym, bool &outBlocked, string &outReason, int &o
       }
 
       string dealSym = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
-      string dClean = dealSym;
-      StringToUpper(dClean);
-      if(IsSymbolMatch(dClean, InpXAU_Patterns))       dClean = "XAUUSD";
-      else if(IsSymbolMatch(dClean, InpDJ30_Patterns)) dClean = "US30";
-      else if(IsSymbolMatch(dClean, InpNAS_Patterns))  dClean = "NAS100";
-      else if(IsSymbolMatch(dClean, InpGJ_Patterns))   dClean = "GBPJPY";
-      else if(IsSymbolMatch(dClean, InpGU_Patterns))   dClean = "GBPUSD";
-      else if(IsSymbolMatch(dClean, InpAUD_Patterns))  dClean = "AUDUSD";
-      else if(IsSymbolMatch(dClean, InpOIL_Patterns))  dClean = "USOIL";
-      else if(IsSymbolMatch(dClean, InpBTC_Patterns))  dClean = "BTCUSD";
-      else if(IsSymbolMatch(dClean, InpAMD_Patterns))  dClean = "AMD";
+      string dClean = SEGSInstrumentKey(dealSym);
 
       // Extract shortSig if present in comment (SEGS|ADV|{shortSig}|L...)
       string shortSig = "";
@@ -13643,7 +13687,7 @@ void CheckCircuitBreaker(string sym, bool &outBlocked, string &outReason, int &o
 //+------------------------------------------------------------------+
 void ExecuteAdvisedTrade(bool isAutoTrade=false)
 {
-   if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
+   if(!g_runtimeReady || g_quoteRecoveryPending || !SEGSQuoteFresh(_Symbol)) return;
    string sym = _Symbol;
 
    // Anti-Spam Rapid-Fire Throttle: at least 15s between order bursts (bypassed on TRIGGERED auto execution)
@@ -13656,17 +13700,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    s_lastExecAttemptTime = TimeCurrent();
 
    // Symbol Cooldown Check
-   string cleanSym = sym;
-   StringToUpper(cleanSym);
-   if(IsSymbolMatch(cleanSym, InpXAU_Patterns))       cleanSym = "XAUUSD";
-   else if(IsSymbolMatch(cleanSym, InpDJ30_Patterns)) cleanSym = "US30";
-   else if(IsSymbolMatch(cleanSym, InpNAS_Patterns))  cleanSym = "NAS100";
-   else if(IsSymbolMatch(cleanSym, InpGJ_Patterns))   cleanSym = "GBPJPY";
-   else if(IsSymbolMatch(cleanSym, InpGU_Patterns))   cleanSym = "GBPUSD";
-   else if(IsSymbolMatch(cleanSym, InpAUD_Patterns))  cleanSym = "AUDUSD";
-   else if(IsSymbolMatch(cleanSym, InpOIL_Patterns))  cleanSym = "USOIL";
-   else if(IsSymbolMatch(cleanSym, InpBTC_Patterns))  cleanSym = "BTCUSD";
-   else if(IsSymbolMatch(cleanSym, InpAMD_Patterns))  cleanSym = "AMD";
+   string cleanSym = SEGSInstrumentKey(sym);
 
    string gvCdKey = "SEGS_COOLDOWN_" + cleanSym + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
    if(GlobalVariableCheck(gvCdKey))
@@ -14239,17 +14273,7 @@ void CheckAndAutoTradeAdvice()
    if(g_setupState != "TRIGGERED" && !g_hasViableEntry && TimeCurrent() - s_lastAutoExecAttempt < 5) return;
 
    // 1C. Symbol Cooldown Check
-   string cleanSym = _Symbol;
-   StringToUpper(cleanSym);
-   if(IsSymbolMatch(cleanSym, InpXAU_Patterns))       cleanSym = "XAUUSD";
-   else if(IsSymbolMatch(cleanSym, InpDJ30_Patterns)) cleanSym = "US30";
-   else if(IsSymbolMatch(cleanSym, InpNAS_Patterns))  cleanSym = "NAS100";
-   else if(IsSymbolMatch(cleanSym, InpGJ_Patterns))   cleanSym = "GBPJPY";
-   else if(IsSymbolMatch(cleanSym, InpGU_Patterns))   cleanSym = "GBPUSD";
-   else if(IsSymbolMatch(cleanSym, InpAUD_Patterns))  cleanSym = "AUDUSD";
-   else if(IsSymbolMatch(cleanSym, InpOIL_Patterns))  cleanSym = "USOIL";
-   else if(IsSymbolMatch(cleanSym, InpBTC_Patterns))  cleanSym = "BTCUSD";
-   else if(IsSymbolMatch(cleanSym, InpAMD_Patterns))  cleanSym = "AMD";
+   string cleanSym = SEGSInstrumentKey(_Symbol);
 
    string gvCdKey = "SEGS_COOLDOWN_" + cleanSym + "_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
    if(GlobalVariableCheck(gvCdKey))
@@ -14823,188 +14847,153 @@ double ComputeOpenPnL_Now()
 //| Enforces Win Rate = Profitable Setups / Total Closed Setups      |
 //| Calculates Toronto Hour metrics and Edge Quality classification  |
 //+------------------------------------------------------------------+
+// Shared history snapshot: completed position lifetimes grouped by explicit SEGS identity.
+// Open legs keep the entire setup pending. Entry costs and close-by deals are included.
+uint SEGSHistoryHash(string key)
+{
+   uint hash = 2166136261;
+   for(int i=0; i<StringLen(key); i++) hash = (hash ^ (uint)StringGetCharacter(key,i)) * 16777619;
+   return hash;
+}
+
+int SEGSHistorySlot(string key, string &keys[], int &indexes[])
+{
+   int size = ArraySize(keys);
+   if(size <= 0) return -1;
+   int slot = (int)(SEGSHistoryHash(key) % (uint)size);
+   for(int probe=0; probe<size; probe++)
+   {
+      if(indexes[slot] < 0 || keys[slot] == key) return slot;
+      slot++; if(slot == size) slot=0;
+   }
+   return -1;
+}
+
+string SEGSHistorySetupKey(string symbol, string comment, long positionId)
+{
+   string tag = "";
+   int start = StringFind(comment,"SEGS|ADV|");
+   if(start >= 0) tag="ADV_";
+   else { start=StringFind(comment,"SEGS|MAN|"); if(start >= 0) tag="MAN_"; }
+   if(start >= 0)
+   {
+      string tail=StringSubstr(comment,start+9);
+      int end=StringFind(tail,"|");
+      if(end > 0) return symbol+"|"+tag+StringSubstr(tail,0,end);
+   }
+   // The untagged master and its MAN clones share the master position identifier.
+   return symbol+"|MAN_"+IntegerToString(positionId);
+}
+
+bool SEGSRefreshHistory()
+{
+   ulong now=GetTickCount64();
+   long account=AccountInfoInteger(ACCOUNT_LOGIN);
+   if(account != g_historyAccount)
+   {
+      g_historyAccount=account; g_historyDirty=true; g_historyValid=false;
+      ArrayResize(g_historySetups,0);
+   }
+   if(now < g_historyNextRefresh) return g_historyValid && !g_historyDirty;
+   g_historyNextRefresh=now+1000; // Bound retries even when history/allocation fails.
+   g_historyValid=false;
+   if(!HistorySelect(0,TimeCurrent())) return false;
+   int total=HistoryDealsTotal();
+   if(total > 100000) return false; // Explicit unavailable state; never silently truncate history.
+   int capacity=MathMax(17,total*2+1);
+   string keys[]; int indexes[];
+   SEGSHistoryRecord positions[], setups[];
+   if(ArrayResize(keys,capacity)!=capacity || ArrayResize(indexes,capacity)!=capacity ||
+      ArrayResize(positions,total)!=total || ArrayResize(setups,total)!=total) return false;
+   ArrayInitialize(indexes,-1);
+   int count=0;
+   for(int i=0; i<total; i++)
+   {
+      ulong ticket=HistoryDealGetTicket(i);
+      if(ticket==0) return false;
+      long type=HistoryDealGetInteger(ticket,DEAL_TYPE);
+      if(type!=DEAL_TYPE_BUY && type!=DEAL_TYPE_SELL) continue;
+      long id=HistoryDealGetInteger(ticket,DEAL_POSITION_ID);
+      if(id<=0) continue;
+      string symbol=HistoryDealGetString(ticket,DEAL_SYMBOL);
+      string posKey=symbol+"|"+IntegerToString(id);
+      int slot=SEGSHistorySlot(posKey,keys,indexes);
+      if(slot<0) return false;
+      int p=indexes[slot];
+      if(p<0)
+      {
+         p=count++; indexes[slot]=p; keys[slot]=posKey;
+         positions[p].key=SEGSHistorySetupKey(symbol,"",id);
+         positions[p].symbol=symbol; positions[p].pnl=0; positions[p].volume=0;
+         positions[p].exitTime=0; positions[p].hasEntry=false; positions[p].hasExit=false;
+      }
+      long entry=HistoryDealGetInteger(ticket,DEAL_ENTRY);
+      if(entry==DEAL_ENTRY_IN)
+      {
+         // Preserve the original entry identity; later fills cannot reclassify a position.
+         if(!positions[p].hasEntry)
+            positions[p].key=SEGSHistorySetupKey(symbol,HistoryDealGetString(ticket,DEAL_COMMENT),id);
+         positions[p].hasEntry=true;
+      }
+      if(entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY || entry==DEAL_ENTRY_INOUT)
+      {
+         positions[p].hasExit=true;
+         positions[p].exitTime=(datetime)MathMax((long)positions[p].exitTime,HistoryDealGetInteger(ticket,DEAL_TIME));
+      }
+      positions[p].pnl+=HistoryDealGetDouble(ticket,DEAL_PROFIT)+HistoryDealGetDouble(ticket,DEAL_SWAP)+
+                        HistoryDealGetDouble(ticket,DEAL_COMMISSION)+HistoryDealGetDouble(ticket,DEAL_FEE);
+      double volume=HistoryDealGetDouble(ticket,DEAL_VOLUME);
+      positions[p].volume+=(type==DEAL_TYPE_BUY ? volume : -volume);
+   }
+   // Live positions prevent counting a partially closed lifetime, including reversals.
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      if(PositionGetTicket(i)==0) return false;
+      string key=PositionGetString(POSITION_SYMBOL)+"|"+IntegerToString(PositionGetInteger(POSITION_IDENTIFIER));
+      int slot=SEGSHistorySlot(key,keys,indexes);
+      if(slot>=0 && indexes[slot]>=0) positions[indexes[slot]].hasExit=false;
+   }
+   ArrayInitialize(indexes,-1);
+   int setupCount=0;
+   for(int p=0; p<count; p++)
+   {
+      int slot=SEGSHistorySlot(positions[p].key,keys,indexes);
+      if(slot<0) return false;
+      int s=indexes[slot];
+      if(s<0)
+      {
+         s=setupCount++; indexes[slot]=s; keys[slot]=positions[p].key;
+         setups[s].key=positions[p].key; setups[s].symbol=positions[p].symbol;
+         setups[s].pnl=0; setups[s].exitTime=0; setups[s].complete=true;
+      }
+      setups[s].pnl+=positions[p].pnl;
+      setups[s].exitTime=(datetime)MathMax((long)setups[s].exitTime,(long)positions[p].exitTime);
+      if(!positions[p].hasEntry || !positions[p].hasExit || MathAbs(positions[p].volume)>0.00000001)
+         setups[s].complete=false;
+   }
+   if(ArrayResize(g_historySetups,setupCount)!=setupCount) { g_historyValid=false; return false; }
+   for(int s=0; s<setupCount; s++) g_historySetups[s]=setups[s];
+   g_historyValid=true; g_historyDirty=false;
+   g_historyNextRefresh=now+30000; // Rendering never rescans the account on every tick.
+   return true;
+}
+
 void ComputeWinRate_PastTrades(string targetSymbol, double &winRate, int &winTrades, int &lossTrades, double &profitFactor)
 {
-   winRate = 0.0;
-   winTrades = 0;
-   lossTrades = 0;
-   profitFactor = 1.0;
-   double grossProfit = 0.0;
-   double grossLoss = 0.0;
-
-   if(!HistorySelect(0, TimeCurrent())) return;
-   int totalDeals = HistoryDealsTotal();
-   if(totalDeals == 0) return;
-
-   // Pass 1: Index entry deals (DEAL_ENTRY_IN) to preserve original setup comments and entry times
-   // even if broker overwrote exit deal comments with [sl] or [tp]
-   struct DealEntryInfo
+   winRate=0; winTrades=0; lossTrades=0; profitFactor=0;
+   if(!SEGSRefreshHistory()) return;
+   double grossProfit=0, grossLoss=0;
+   for(int i=0; i<ArraySize(g_historySetups); i++)
    {
-      long     posId;
-      datetime entryTime;
-      string   comment;
-   };
-
-   DealEntryInfo inDeals[];
-   int inCount = 0;
-   ArrayResize(inDeals, 200);
-
-   for(int i = 0; i < totalDeals; i++)
-   {
-      ulong dTk = HistoryDealGetTicket(i);
-      if(dTk <= 0) continue;
-      long entry = HistoryDealGetInteger(dTk, DEAL_ENTRY);
-      if(entry == DEAL_ENTRY_IN)
-      {
-         long pId = HistoryDealGetInteger(dTk, DEAL_POSITION_ID);
-         if(pId <= 0) continue;
-
-         if(inCount >= ArraySize(inDeals))
-            ArrayResize(inDeals, inCount + 100);
-
-         inDeals[inCount].posId = pId;
-         inDeals[inCount].entryTime = (datetime)HistoryDealGetInteger(dTk, DEAL_TIME);
-         inDeals[inCount].comment = HistoryDealGetString(dTk, DEAL_COMMENT);
-         inCount++;
-      }
+      if(!g_historySetups[i].complete) continue;
+      if(targetSymbol!="" && targetSymbol!="ALL" && !IsSameChartAsset(g_historySetups[i].symbol,targetSymbol)) continue;
+      double pnl=g_historySetups[i].pnl;
+      if(pnl>0.05) winTrades++;
+      else if(pnl< -0.05) lossTrades++;
+      if(pnl>0) grossProfit+=pnl; else grossLoss-=pnl;
    }
-
-   // Pass 2: Aggregate deals by Setup ID (Section 29)
-   struct SetupRecord
-   {
-      string   setupKey;
-      string   symbol;
-      double   netProfit;
-      datetime exitTime;
-      datetime entryTime;
-      int      dealCount;
-   };
-
-   SetupRecord setups[];
-   int setupCount = 0;
-   ArrayResize(setups, 100);
-
-   for(int i = 0; i < totalDeals; i++)
-   {
-      ulong dealTicket = HistoryDealGetTicket(i);
-      if(dealTicket == 0) continue;
-
-      long entryType = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
-      if(entryType != DEAL_ENTRY_OUT && entryType != DEAL_ENTRY_INOUT) continue;
-
-      string dealSym = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
-      if(targetSymbol != "" && targetSymbol != "ALL" && !IsSameChartAsset(dealSym, targetSymbol)) continue;
-
-      double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT) +
-                      HistoryDealGetDouble(dealTicket, DEAL_SWAP) +
-                      HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
-
-      string cmt = HistoryDealGetString(dealTicket, DEAL_COMMENT);
-      long posId = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
-      datetime dTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
-      datetime setupEntryTime = dTime;
-
-      // Look up entry deal info for preserved comment and true entry time
-      for(int k = 0; k < inCount; k++)
-      {
-         if(inDeals[k].posId == posId)
-         {
-            setupEntryTime = inDeals[k].entryTime;
-            // If exit deal comment has no SEGS prefix, inherit entry deal comment
-            if(StringFind(cmt, "SEGS|") < 0 && StringFind(inDeals[k].comment, "SEGS|") >= 0)
-               cmt = inDeals[k].comment;
-            break;
-         }
-      }
-
-      // Extract Setup Key
-      string sKey = "";
-      int advIdx = StringFind(cmt, "SEGS|ADV|");
-      if(advIdx >= 0)
-      {
-         string rem = StringSubstr(cmt, advIdx + 9);
-         string parts[];
-         if(StringSplit(rem, '|', parts) >= 1) sKey = "ADV_" + parts[0];
-      }
-      else
-      {
-         int manIdx = StringFind(cmt, "SEGS|MAN|");
-         if(manIdx >= 0)
-         {
-            string rem = StringSubstr(cmt, manIdx + 9);
-            string parts[];
-            if(StringSplit(rem, '|', parts) >= 1) sKey = "MAN_" + parts[0];
-         }
-         else
-         {
-            int hashIdx = StringFind(cmt, "#");
-            if(hashIdx >= 0)
-            {
-               sKey = "MAN_" + StringSubstr(cmt, hashIdx + 1);
-            }
-            else
-            {
-               sKey = "POS_" + dealSym + "_" + IntegerToString(posId);
-            }
-         }
-      }
-
-      int foundIdx = -1;
-      for(int s = 0; s < setupCount; s++)
-      {
-         if(setups[s].setupKey == sKey)
-         {
-            foundIdx = s;
-            break;
-         }
-      }
-
-      if(foundIdx >= 0)
-      {
-         setups[foundIdx].netProfit += profit;
-         setups[foundIdx].dealCount++;
-         if(dTime > setups[foundIdx].exitTime) setups[foundIdx].exitTime = dTime;
-         if(setupEntryTime < setups[foundIdx].entryTime) setups[foundIdx].entryTime = setupEntryTime;
-      }
-      else
-      {
-         if(setupCount >= ArraySize(setups))
-            ArrayResize(setups, setupCount + 100);
-
-         setups[setupCount].setupKey   = sKey;
-         setups[setupCount].symbol     = dealSym;
-         setups[setupCount].netProfit  = profit;
-         setups[setupCount].exitTime   = dTime;
-         setups[setupCount].entryTime  = setupEntryTime;
-         setups[setupCount].dealCount  = 1;
-         setupCount++;
-      }
-   }
-
-   // Compute setup-level win rate and profit factor
-   for(int s = 0; s < setupCount; s++)
-   {
-      double p = setups[s].netProfit;
-      if(p > 0.001)
-      {
-         winTrades++;
-         grossProfit += p;
-      }
-      else if(p < -0.001)
-      {
-         lossTrades++;
-         grossLoss += MathAbs(p);
-      }
-   }
-
-   int totalSetups = winTrades + lossTrades;
-   if(totalSetups > 0)
-      winRate = NormalizeDouble(((double)winTrades / (double)totalSetups) * 100.0, 1);
-
-   if(grossLoss > 0.0)
-      profitFactor = NormalizeDouble(grossProfit / grossLoss, 2);
-   else if(grossProfit > 0.0)
-      profitFactor = 9.99;
+   if(winTrades+lossTrades>0) winRate=NormalizeDouble(100.0*winTrades/(winTrades+lossTrades),1);
+   profitFactor=(grossLoss>0 ? grossProfit/grossLoss : (grossProfit>0 ? 9.99 : 0));
 }
 
 void ShiftStopLossTicket(ulong ticket, double deltaPips)
@@ -16704,7 +16693,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.75", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.77", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {
@@ -16744,34 +16733,14 @@ int DiscoverSEGSSymbols(string &outSymbols[])
       }
    }
 
-   if(HistorySelect(0, TimeCurrent()))
+   if(SEGSRefreshHistory())
    {
-      int dealsTotal = HistoryDealsTotal();
-      for(int i = dealsTotal - 1; i >= 0 && count < 16; i--)
+      for(int i=ArraySize(g_historySetups)-1; i>=0 && count<16; i--)
       {
-         ulong dt = HistoryDealGetTicket(i);
-         if(dt > 0)
-         {
-            long entry = HistoryDealGetInteger(dt, DEAL_ENTRY);
-            if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_INOUT)
-            {
-               string sym = HistoryDealGetString(dt, DEAL_SYMBOL);
-               if(sym != "")
-               {
-                  bool exists = false;
-                  for(int s = 0; s < count; s++)
-                  {
-                     if(outSymbols[s] == sym) { exists = true; break; }
-                  }
-                  if(!exists)
-                  {
-                     count++;
-                     ArrayResize(outSymbols, count);
-                     outSymbols[count - 1] = sym;
-                  }
-               }
-            }
-         }
+         string sym=g_historySetups[i].symbol;
+         bool exists=false;
+         for(int j=0; j<count; j++) if(outSymbols[j]==sym) { exists=true; break; }
+         if(!exists && sym!="" && ArrayResize(outSymbols,count+1)==count+1) outSymbols[count++]=sym;
       }
    }
 
@@ -16855,9 +16824,14 @@ void DrawWinRateHUD()
    else
       ObjectDelete(0, PREFIX + "WR_BTN_BACK");
 
-   // 1. Accurate Account History Deals Analysis (Closed Trades)
-   HistorySelect(0, TimeCurrent());
-   int totalDeals = HistoryDealsTotal();
+   // One shared snapshot supplies setup totals and the per-symbol/hour audit.
+   if(!SEGSRefreshHistory())
+   {
+      DeleteWinRateHUD();
+      CreateOrUpdateCell(PREFIX + "WR_STATUS", wx+12, tabY+30, "HISTORY UNAVAILABLE / REFRESHING - totals withheld", clrGold, 9, ANCHOR_LEFT_UPPER, wc, InpFontName);
+      return;
+   }
+   ObjectDelete(0, PREFIX + "WR_STATUS");
 
    int wins = 0, losses = 0, breakevens = 0;
    double grossProfit = 0.0, grossLoss = 0.0;
@@ -16882,35 +16856,27 @@ void DrawWinRateHUD()
    ArrayInitialize(symTotal, 0);
    ArrayInitialize(symProfit, 0.0);
 
-   for(int i = 0; i < totalDeals; i++)
+   for(int i = 0; i < ArraySize(g_historySetups); i++)
    {
-      ulong dticket = HistoryDealGetTicket(i);
-      if(dticket <= 0) continue;
-
-      long entry = HistoryDealGetInteger(dticket, DEAL_ENTRY);
-      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT) continue;
-
-      long dealType = HistoryDealGetInteger(dticket, DEAL_TYPE);
-      if(dealType != DEAL_TYPE_BUY && dealType != DEAL_TYPE_SELL) continue;
-
-      string dSym = HistoryDealGetString(dticket, DEAL_SYMBOL);
-      double pnl = HistoryDealGetDouble(dticket, DEAL_PROFIT) +
-                   HistoryDealGetDouble(dticket, DEAL_SWAP) +
-                   HistoryDealGetDouble(dticket, DEAL_COMMISSION);
-      datetime dTime = (datetime)HistoryDealGetInteger(dticket, DEAL_TIME);
+      if(!g_historySetups[i].complete) continue;
+      string dSym = g_historySetups[i].symbol;
+      double pnl = g_historySetups[i].pnl;
+      datetime dTime = g_historySetups[i].exitTime;
 
       bool matchSelected = (isAll || IsSameChartAsset(dSym, g_winRateSelectedSymbol));
       if(matchSelected)
       {
+         if(pnl > 0.0) grossProfit += pnl;
+         else grossLoss -= pnl;
          if(pnl > 0.05)
          {
             wins++;
-            grossProfit += pnl;
+
          }
          else if(pnl < -0.05)
          {
             losses++;
-            grossLoss += MathAbs(pnl);
+
          }
          else
          {
@@ -17429,7 +17395,7 @@ void ActivateAllPendingOrders()
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
-   if(!SEGSEnsureRuntimeReady()) return;
+   if(!SEGSServiceDataStatus()) return;
    if(id >= CHARTEVENT_CUSTOM)
    {
       // Handle system-wide sync broadcast across charts
@@ -17455,7 +17421,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       }
    }
 
-   if(!SEGSEnsureRuntimeReady()) return;
+   if(!SEGSServiceDataStatus()) return;
 
    if(id == CHARTEVENT_CHART_CHANGE)
    {
