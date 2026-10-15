@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.82 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.83 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.82"
+#property version   "3.83"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -950,6 +950,29 @@ void SEGSSyncStopSettings(bool publish=false)
    g_systemMaxStopPercent=MathMax(0.0,MathMin(20.0,GlobalVariableGet(SEGSStopKey("MAX_STOP_PCT"))));
 }
 
+input group "=== System Active Position Dashboard ==="
+input bool InpShowActiveLegCounts = true;
+input bool InpShowOverallActiveRR = true;
+input bool InpShowPerLegActiveRR = true; // Up to four ticket ratios when space permits
+input bool InpPublishDisplaySettingsToAllCharts = false; // Publish from one chart for this account
+bool g_showActiveLegCounts=true, g_showOverallActiveRR=true, g_showPerLegActiveRR=true;
+string SEGSDisplayKey(string field)
+{
+   return "SEGS_HUD_V1_"+IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"_"+field;
+}
+void SEGSSyncDisplaySettings(bool publish=false)
+{
+   if(publish || !GlobalVariableCheck(SEGSDisplayKey("LEGS")))
+   {
+      GlobalVariableSet(SEGSDisplayKey("LEGS"),InpShowActiveLegCounts ? 1.0 : 0.0);
+      GlobalVariableSet(SEGSDisplayKey("OVERALL_RR"),InpShowOverallActiveRR ? 1.0 : 0.0);
+      GlobalVariableSet(SEGSDisplayKey("LEG_RR"),InpShowPerLegActiveRR ? 1.0 : 0.0);
+   }
+   g_showActiveLegCounts=GlobalVariableGet(SEGSDisplayKey("LEGS"))>0.5;
+   g_showOverallActiveRR=GlobalVariableGet(SEGSDisplayKey("OVERALL_RR"))>0.5;
+   g_showPerLegActiveRR=GlobalVariableGet(SEGSDisplayKey("LEG_RR"))>0.5;
+}
+
 input double InpDualProximityATR = 0.85;
 struct SEGSHistoryRecord
 {
@@ -993,6 +1016,7 @@ bool SEGSEnsureRuntimeReady()
    if(now < nextRetryMs) return lastCheckReady;
    lastCheckReady = false;
    nextRetryMs = now + 1000;
+   SEGSSyncDisplaySettings();
    SEGSSyncStopSettings();
    InitIndicatorHandles(_Symbol);
    ENUM_TIMEFRAMES frames[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4, PERIOD_D1, PERIOD_W1};
@@ -1061,8 +1085,9 @@ int OnInit()
 {
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
+   SEGSSyncDisplaySettings(InpPublishDisplaySettingsToAllCharts);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.82 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.83 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1149,7 +1174,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.82 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.83 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -3418,6 +3443,58 @@ int SEGSReadActiveDisplay(string sym, SEGSActiveDisplay &rows[])
       rows[row].lastOpened=(datetime)MathMax((long)rows[row].lastOpened,(long)posInfo.Time());
    }
    return ArraySize(rows);
+}
+
+string SEGSOpenedLegKey(string sym,string tag)
+{
+   return "SEGS_OPEN_"+IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"_"+IntegerToString(SEGSHistoryHash(sym))+"_"+tag;
+}
+int SEGSOriginalOpenedLegs(string sym,SEGSActiveDisplay &rows[])
+{
+   int total=0;
+   for(int i=0;i<ArraySize(rows);i++)
+   {
+      if(rows[i].legacy) return -1;
+      int end=StringFind(rows[i].key,"|");
+      if(end<1) return -1;
+      string key=SEGSOpenedLegKey(sym,StringSubstr(rows[i].key,0,end));
+      if(!GlobalVariableCheck(key)) return -1;
+      int opened=(int)GlobalVariableGet(key);
+      if(opened<rows[i].legs) return -1;
+      total+=opened;
+   }
+   return total;
+}
+
+// Cash-valued, gross R:R for surviving broker legs, using their current protection.
+string SEGSFormatActiveRR(double risk,double reward,bool valid)
+{
+   if(!valid) return "N/A";
+   if(risk<=0.00000001) return "PROTECTED";
+   return "1:"+DoubleToString(reward/risk,2);
+}
+void SEGSActiveRR(string sym,string &overall,string &detail)
+{
+   double risk=0.0,reward=0.0;
+   bool valid=true;
+   int count=0;
+   detail="";
+   for(int i=0;i<PositionsTotal();i++)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !posInfo.SelectByTicket(ticket) || !SEGSSelectedAdvisorPosition(sym)) continue;
+      ENUM_ORDER_TYPE type=posInfo.PositionType()==POSITION_TYPE_BUY ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double atStop=0.0,atTarget=0.0;
+      bool legValid=posInfo.StopLoss()>0 && posInfo.TakeProfit()>0;
+      if(legValid) legValid=OrderCalcProfit(type,sym,posInfo.Volume(),posInfo.PriceOpen(),posInfo.StopLoss(),atStop) &&
+         OrderCalcProfit(type,sym,posInfo.Volume(),posInfo.PriceOpen(),posInfo.TakeProfit(),atTarget);
+      valid=valid && legValid;
+      risk+=MathMax(0.0,-atStop); reward+=MathMax(0.0,atTarget);
+      if(count<4) detail+=(count>0 ? "  #" : "#")+IntegerToString((long)ticket)+" "+SEGSFormatActiveRR(MathMax(0.0,-atStop),MathMax(0.0,atTarget),legValid);
+      count++;
+   }
+   if(count>4) detail+="  +"+IntegerToString(count-4)+" more";
+   overall=count>0 ? SEGSFormatActiveRR(risk,reward,valid) : "N/A";
 }
 
 bool SEGSHasDisplayPlan(string sym)
@@ -13863,6 +13940,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    }
    else
    {
+      GlobalVariableSet(SEGSOpenedLegKey(sym,shortSig),(double)successCount);
       g_telemetry.ordersExecuted++;
       GlobalVariableSet(sigExecKey, 2.0);
       GlobalVariableDel(pendingTimeKey);
@@ -15532,7 +15610,7 @@ void DrawSentimentHUD()
    if(!g_showSentimentHUD) return;
    SEGSActiveDisplay activeRows[];
    int activeCount=SEGSReadActiveDisplay(_Symbol,activeRows);
-   int activeRowExtra=activeCount>1 ? 28 : 0;
+   int activeRowExtra=42; // Single summary, counts, cash-weighted R:R and optional ticket detail
 
    int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
    int chartH = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
@@ -15783,23 +15861,38 @@ void DrawSentimentHUD()
       (isTradeTaken ? StringFormat("ACTIVE: %d OPEN ADVISOR POSITION(S)",openLegs) : "NO ACTIVE ADVISOR POSITION");
    CreateOrUpdateCell(PREFIX+"SNT_C3_ACT",sx+14,c3Y+16,activeStatus,isTradeTaken ? clrLime : clrSilver,8,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
    ObjectDelete(0,PREFIX+"SNT_C3_STP");
-   if(activeCount>2) CreateOrUpdateCell(PREFIX+"SNT_C3_STP",btnAdvX-12,c3Y+16,StringFormat("SHOWING 2 OF %d ENTRY GROUPS",activeCount),clrGold,7,ANCHOR_RIGHT_UPPER,CORNER_LEFT_UPPER,"Consolas");
    ObjectDelete(0,PREFIX+"SNT_C3_QUAL");
-   for(int i=0; i<2; i++)
+   // Remove all old per-group objects after an in-place recompile.
+   ObjectsDeleteAll(0,PREFIX+"SNT_C3_ACTIVE_");
+   string entryText="",executionText="",legText="",overallRR="",legRR="";
+   if(isTradeTaken)
    {
-      string name=PREFIX+"SNT_C3_ACTIVE_"+IntegerToString(i);
-      if(i>=activeCount) { ObjectDelete(0,name); ObjectDelete(0,name+"_TIME"); continue; }
-      string entry=DoubleToString(activeRows[i].entryLow,symDigits);
-      if(activeRows[i].entryHigh>activeRows[i].entryLow) entry+=".."+DoubleToString(activeRows[i].entryHigh,symDigits);
-      string stop=activeRows[i].stopLow>0 ? DoubleToString(activeRows[i].stopLow,symDigits) : "NOT SET";
-      if(activeRows[i].stopHigh>activeRows[i].stopLow) stop+=".."+DoubleToString(activeRows[i].stopHigh,symDigits);
-      string text="ACTIVE ENTRY "+(activeCount>1 ? "#"+IntegerToString(i+1)+" " : "")+activeRows[i].direction+": "+entry+" | SL: "+stop+" | "+IntegerToString(activeRows[i].legs)+" leg(s)";
-      CreateOrUpdateCell(name,sx+14,c3Y+31+i*28,text,clrWhite,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
-      string executed="EXECUTED: "+FormatExecutionTime(activeRows[i].opened,true);
-      if(activeRows[i].legacy && activeRows[i].lastOpened/60!=activeRows[i].opened/60)
-         executed="FILLS: "+FormatExecutionTime(activeRows[i].opened,true)+" to "+FormatExecutionTime(activeRows[i].lastOpened,true);
-      CreateOrUpdateCell(name+"_TIME",sx+14,c3Y+44+i*28,executed,clrAqua,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
+      double low=activeRows[0].entryLow,high=activeRows[0].entryHigh;
+      datetime first=activeRows[0].opened,last=activeRows[0].lastOpened;
+      string direction=activeRows[0].direction;
+      for(int i=1;i<activeCount;i++)
+      {
+         low=MathMin(low,activeRows[i].entryLow); high=MathMax(high,activeRows[i].entryHigh);
+         first=(datetime)MathMin((long)first,(long)activeRows[i].opened);
+         last=(datetime)MathMax((long)last,(long)activeRows[i].lastOpened);
+         if(direction!=activeRows[i].direction) direction="MIXED";
+      }
+      entryText="ACTIVE ENTRY "+direction+": "+DoubleToString(low,symDigits);
+      if(high>low) entryText+=".."+DoubleToString(high,symDigits);
+      executionText="EXECUTED: "+FormatExecutionTime(first,true);
+      if(first/60!=last/60) executionText+=" (latest "+FormatExecutionTime(last,true)+")";
+      int original=SEGSOriginalOpenedLegs(sym,activeRows);
+      legText="LEGS OPENED: "+(original>=0 ? IntegerToString(original) : "N/A")+" | REMAINING: "+IntegerToString(openLegs);
+      if(original>=0) legText+=" | CLOSED: "+IntegerToString(original-openLegs);
+      SEGSActiveRR(sym,overallRR,legRR);
    }
+   CreateOrUpdateCell(PREFIX+"SNT_C3_ACTIVE_SUMMARY",sx+14,c3Y+31,entryText,clrWhite,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
+   CreateOrUpdateCell(PREFIX+"SNT_C3_EXECUTED",sx+14,c3Y+45,executionText,clrAqua,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
+   CreateOrUpdateCell(PREFIX+"SNT_C3_LEGS",sx+14,c3Y+59,g_showActiveLegCounts ? legText : "",clrWhite,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
+   CreateOrUpdateCell(PREFIX+"SNT_C3_RR",sx+14,c3Y+73,isTradeTaken && g_showOverallActiveRR ? "OPEN-LEGS OVERALL R:R: "+overallRR+" (current SL/TP; gross)" : "",clrGold,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
+   // Below the buttons: keep ticket ratios within the panel, never overlap controls.
+   bool fitsLegRR=StringLen(legRR)<=100;
+   CreateOrUpdateCell(PREFIX+"SNT_C3_LEG_RR",sx+14,c3Y+87,isTradeTaken && g_showPerLegActiveRR ? (fitsLegRR ? legRR : "PER-LEG R:R: expand Trade tab / ticket details") : "",clrSilver,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
    string planned=hasPlan ? "NEXT PLANNED ENTRY "+g_currentAdvisedAction+": "+DoubleToString(g_staticEntryPrice,symDigits)+" | SL: "+DoubleToString(g_staticSL,symDigits) : "NEXT SETUP: SCANNING / NO PLANNED ENTRY";
    CreateOrUpdateCell(PREFIX+"SNT_C3_LVL",sx+14,c3Y+63+activeRowExtra,planned,hasPlan ? clrGold : clrSilver,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
    string nextState=cbBlocked ? "NEW ENTRIES PAUSED: CIRCUIT BREAKER" :
@@ -15849,7 +15942,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.82", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.83", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {
