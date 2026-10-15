@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.78.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.79.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.78 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.79 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.78"
+#property version   "3.79"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -770,7 +770,7 @@ void InitPositionGroup(PositionGroup &grp);
 double NormalizePriceToTickSize(string sym, double price);
 int  ValidateProtectionTarget(string sym, ENUM_POSITION_TYPE ptype, double curPrice, double targetPrice, bool isStopLoss);
 void SaveAdvisorSetupTargets(string setupID, string sym, ENUM_POSITION_TYPE ptype, double entry, double sl, double tp1, double tp2, double tp3, double tp4, int legs);
-bool LoadAdvisorSetupTargets(string setupID, double &outEntry, double &outSL, double &outTP1, double &outTP2, double &outTP3, double &outTP4, ENUM_POSITION_TYPE &outType, int &outLegs);
+bool LoadAdvisorSetupTargets(string sym, string setupID, double &outEntry, double &outSL, double &outTP1, double &outTP2, double &outTP3, double &outTP4, ENUM_POSITION_TYPE &outType, int &outLegs);
 ulong FindHistoricalLeg2PositionId(string setupID, string sym, datetime groupOpenTime);
 bool IsEligibleNewMasterDeal(ulong dealTicket);
 bool ResolvePositionTicketAndIdFromDeal(ulong dealTicket, string sym, long magic, string commentPattern, ulong &outTicket, ulong &outPosId);
@@ -986,7 +986,7 @@ bool SEGSEnsureRuntimeReady()
    SEGSSyncStopSettings();
    InitIndicatorHandles(_Symbol);
    ENUM_TIMEFRAMES frames[] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H2, PERIOD_H4, PERIOD_D1, PERIOD_W1};
-   int minimums[] = {45, 25, 25, 60, 60, 60, 30, 6, 2};
+   int minimums[] = {45, 25, 25, 80, 80, 80, 80, 6, 2};
    for(int i = 0; i < ArraySize(frames); i++)
    {
       // CopyRates explicitly requests missing history without blocking attachment.
@@ -1042,7 +1042,7 @@ bool SEGSServiceDataStatus()
    ObjectSetInteger(0,name,OBJPROP_YDISTANCE,16);
    ObjectSetInteger(0,name,OBJPROP_COLOR,clrTomato);
    ObjectSetInteger(0,name,OBJPROP_FONTSIZE,11);
-   ObjectSetString(0,name,OBJPROP_TEXT,_Symbol+": "+status);
+   ObjectSetString(0,name,OBJPROP_TEXT,_Symbol+": "+status+" | last bid "+DoubleToString(SymbolInfoDouble(_Symbol,SYMBOL_BID),(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS)));
    return ready;
 }
 
@@ -1051,7 +1051,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.78 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.79 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1138,7 +1138,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.78 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.79 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -1360,6 +1360,7 @@ void RunAdvisorStrategyEngine(bool forceScan, bool allowAutoTrade)
    ScanMarketStructureAndAdvice(forceScan);
    if(SEGSResetExpiredSetup(_Symbol)) ScanMarketStructureAndAdvice(true);
    SEGSCalibrateActiveZoneProtection();
+   SEGSReviewPendingAdvice();
    UpdateOBLocationSnapshot(_Symbol);
    UpdateH1OBLocationSnapshot(_Symbol);
    g_quoteRecoveryPending=false;
@@ -2214,7 +2215,7 @@ void ReconstructPositionGroups()
 
       for(int j = i; j < count && gCount < 4; j++)
       {
-         if(!used[j] && items[j].groupKey == gKey)
+         if(!used[j] && items[j].groupKey == gKey && items[j].symbol == gSym && items[j].ptype == gType)
          {
             grpTickets[gCount] = items[j].ticket;
             grpPosIds[gCount]  = items[j].posId;
@@ -2315,7 +2316,7 @@ void ReconstructPositionGroups()
             double aEntry, aSL, aTP1, aTP2, aTP3, aTP4;
             ENUM_POSITION_TYPE aType;
             int aLegs;
-            if(LoadAdvisorSetupTargets(gKey, aEntry, aSL, aTP1, aTP2, aTP3, aTP4, aType, aLegs))
+            if(LoadAdvisorSetupTargets(gSym, gKey, aEntry, aSL, aTP1, aTP2, aTP3, aTP4, aType, aLegs))
                expTP = aTP2;
          }
 
@@ -2498,7 +2499,7 @@ void ProcessUnassignedPositions()
 
          for(int j = i; j < uCount && groupCnt < 4; j++)
          {
-            if(!processedFlags[j] && unassigned[j].groupKey == gKey)
+            if(!processedFlags[j] && unassigned[j].groupKey == gKey && unassigned[j].symbol == curSym && unassigned[j].ptype == curType)
             {
                groupTickets[groupCnt] = unassigned[j].ticket;
                groupPosIds[groupCnt]  = unassigned[j].posId;
@@ -2641,25 +2642,12 @@ void ProcessUnassignedPositions()
          bool targetsRecovered = false;
          if(advSetupID != "")
          {
-            targetsRecovered = LoadAdvisorSetupTargets(advSetupID, aEntry, aSL, aTP1, aTP2, aTP3, aTP4, aType, aLegs);
+            targetsRecovered = LoadAdvisorSetupTargets(sym, advSetupID, aEntry, aSL, aTP1, aTP2, aTP3, aTP4, aType, aLegs);
          }
-         if(!targetsRecovered && g_currentSignalID != "")
+         if(!targetsRecovered && g_currentSignalID != "" && StringFind(cmt,SEGSShortSignalID(g_currentSignalID))>=0)
          {
-            targetsRecovered = LoadAdvisorSetupTargets("ADV_" + g_currentSignalID, aEntry, aSL, aTP1, aTP2, aTP3, aTP4, aType, aLegs);
+            targetsRecovered = LoadAdvisorSetupTargets(sym, "ADV_" + g_currentSignalID, aEntry, aSL, aTP1, aTP2, aTP3, aTP4, aType, aLegs);
          }
-         if(!targetsRecovered && g_staticSL > 0.0 && IsSameChartAsset(sym, _Symbol))
-         {
-            aEntry = g_staticEntryPrice;
-            aSL    = g_staticSL;
-            aTP1   = g_staticTP1;
-            aTP2   = g_staticTP2;
-            aTP3   = g_staticTP3;
-            aTP4   = g_staticTP4;
-            aType  = (g_currentAdvisedAction == "BUY") ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
-            aLegs  = 4;
-            targetsRecovered = true;
-         }
-
          if(targetsRecovered)
          {
             int leg = 1;
@@ -2677,10 +2665,12 @@ void ProcessUnassignedPositions()
             double modTP = targetTP;
             if(ValidateProtectionLevels(sym, ptype, posInfo.PriceCurrent(), modSL, modTP))
             {
+               double changeTick=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE);
+               if(changeTick>0 && MathAbs(modSL-curSL)<0.5*changeTick && MathAbs(modTP-curTP)<0.5*changeTick) continue;
                ResetLastError();
                bool ok = trade.PositionModify(tk, modSL, modTP);
                uint ret = trade.ResultRetcode();
-               if(!ok || (ret != TRADE_RETCODE_DONE && ret != TRADE_RETCODE_PLACED && ret != TRADE_RETCODE_NO_CHANGES))
+               if(ret != TRADE_RETCODE_NO_CHANGES && (!ok || (ret != TRADE_RETCODE_DONE && ret != TRADE_RETCODE_PLACED)))
                {
                   PrintFormat("[SEGS ADVISOR PROTECT] PositionModify FAILED for #%I64u (%s) -> SL: %.5f, TP: %.5f | Retcode: %u (%s)",
                               tk, sym, modSL, modTP, ret, trade.ResultRetcodeDescription());
@@ -2694,8 +2684,9 @@ void ProcessUnassignedPositions()
          }
          else
          {
-            PrintFormat("[SEGS ADVISOR PROTECT] WARNING: Structural targets could not be recovered for Advisor position #%I64u (Setup: %s).",
-                        tk, (advSetupID != "") ? advSetupID : "UNKNOWN");
+            // Never repair an old position using another setup's chart snapshot.
+            // Broker levels remain authoritative; the symbol's heal pass handles missing protection.
+            if(sym==_Symbol && (curSL<=0 || curTP<=0)) HealOpenAdvisorPositions(sym);
          }
          continue;
       }
@@ -2748,7 +2739,7 @@ void ProcessUnassignedPositions()
          ResetLastError();
          bool ok = trade.PositionModify(tk, targetSL, targetTP);
          uint ret = trade.ResultRetcode();
-         if(!ok || (ret != TRADE_RETCODE_DONE && ret != TRADE_RETCODE_PLACED && ret != TRADE_RETCODE_NO_CHANGES))
+         if(ret != TRADE_RETCODE_NO_CHANGES && (!ok || (ret != TRADE_RETCODE_DONE && ret != TRADE_RETCODE_PLACED)))
          {
             PrintFormat("[SEGS PROTECT] PositionModify FAILED for #%I64u (%s) -> SL: %.5f, TP: %.5f | Retcode: %u (%s)",
                         tk, sym, targetSL, targetTP, ret, trade.ResultRetcodeDescription());
@@ -2950,10 +2941,10 @@ void EnforcePositionStopLossAndTargets()
             if(StringSplit(rem, '|', parts) >= 1) advSetupID = "ADV_" + parts[0];
          }
          bool loaded = false;
-         if(advSetupID != "") loaded = LoadAdvisorSetupTargets(advSetupID, sEntry, sSL, sTP1, sTP2, sTP3, sTP4, sType, sLegs);
-         if(!loaded && g_currentSignalID != "") loaded = LoadAdvisorSetupTargets("ADV_" + g_currentSignalID, sEntry, sSL, sTP1, sTP2, sTP3, sTP4, sType, sLegs);
+         if(advSetupID != "") loaded = LoadAdvisorSetupTargets(sym, advSetupID, sEntry, sSL, sTP1, sTP2, sTP3, sTP4, sType, sLegs);
+         if(!loaded && g_currentSignalID != "" && StringFind(cmt,SEGSShortSignalID(g_currentSignalID))>=0) loaded = LoadAdvisorSetupTargets(sym, "ADV_" + g_currentSignalID, sEntry, sSL, sTP1, sTP2, sTP3, sTP4, sType, sLegs);
          if(loaded && sSL > 0.0) sl = sSL;
-         else if(g_staticSL > 0.0) sl = g_staticSL;
+
       }
 
       // 1. Authoritative Stop Loss Breach Watchdog:
@@ -3051,7 +3042,7 @@ void CheckBreakevenConditions()
                double aEntry, aSL, aTP1, aTP2, aTP3, aTP4;
                ENUM_POSITION_TYPE aType;
                int aLegs;
-               if(LoadAdvisorSetupTargets(g_groups[g].setupID, aEntry, aSL, aTP1, aTP2, aTP3, aTP4, aType, aLegs))
+               if(LoadAdvisorSetupTargets(g_groups[g].symbol, g_groups[g].setupID, aEntry, aSL, aTP1, aTP2, aTP3, aTP4, aType, aLegs))
                   expTP = aTP2;
             }
 
@@ -4975,9 +4966,18 @@ bool ValidateProtectionLevels(string sym, ENUM_POSITION_TYPE ptype, double curPr
 //+------------------------------------------------------------------+
 //| Persist Advisor setup structural targets to Global Variables     |
 //+------------------------------------------------------------------+
+string SEGSSetupTargetKey(string sym, string setupID)
+{
+   // Compact account + exact-symbol identity stays below MT5's 63-character GV limit.
+   return "SEGS_T3_"+IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"_"+
+      IntegerToString((long)SEGSHistoryHash(sym))+"_"+IntegerToString((long)SEGSHistoryHash(setupID))+"_";
+}
+
 void SaveAdvisorSetupTargets(string setupID, string sym, ENUM_POSITION_TYPE ptype, double entry, double sl, double tp1, double tp2, double tp3, double tp4, int legs)
 {
-   string pfx = "SEGS_TRG_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + setupID + "_";
+   string pfx = SEGSSetupTargetKey(sym,setupID);
+   GlobalVariableSet(pfx + "SYM", (double)SEGSHistoryHash("SYMBOL:"+sym));
+   GlobalVariableSet(pfx + "ID", (double)SEGSHistoryHash("SETUP:"+setupID));
    GlobalVariableSet(pfx + "ENTRY", entry);
    GlobalVariableSet(pfx + "SL", sl);
    GlobalVariableSet(pfx + "TP1", tp1);
@@ -4994,10 +4994,12 @@ void SaveAdvisorSetupTargets(string setupID, string sym, ENUM_POSITION_TYPE ptyp
 //+------------------------------------------------------------------+
 //| Load Advisor setup structural targets from Global Variables      |
 //+------------------------------------------------------------------+
-bool LoadAdvisorSetupTargets(string setupID, double &outEntry, double &outSL, double &outTP1, double &outTP2, double &outTP3, double &outTP4, ENUM_POSITION_TYPE &outType, int &outLegs)
+bool LoadAdvisorSetupTargets(string sym, string setupID, double &outEntry, double &outSL, double &outTP1, double &outTP2, double &outTP3, double &outTP4, ENUM_POSITION_TYPE &outType, int &outLegs)
 {
-   string pfx = "SEGS_TRG_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + setupID + "_";
-   if(!GlobalVariableCheck(pfx + "SL")) return false;
+   string pfx = SEGSSetupTargetKey(sym,setupID);
+   if(!GlobalVariableCheck(pfx + "SL") || !GlobalVariableCheck(pfx + "SYM") || !GlobalVariableCheck(pfx + "ID")) return false;
+   if(GlobalVariableGet(pfx + "SYM")!=(double)SEGSHistoryHash("SYMBOL:"+sym) ||
+      GlobalVariableGet(pfx + "ID")!=(double)SEGSHistoryHash("SETUP:"+setupID)) return false;
 
    outEntry = GlobalVariableGet(pfx + "ENTRY");
    outSL    = GlobalVariableGet(pfx + "SL");
@@ -5164,11 +5166,13 @@ bool IsEligibleNewMasterDeal(ulong dealTicket)
 int FindGroupIndexBySetupOrPosition(string setupID, ulong ticket, ulong posId)
 {
    int gCount = ArraySize(g_groups);
-   if(setupID != "")
+   string symbol="";
+   if(ticket>0 && PositionSelectByTicket(ticket)) symbol=PositionGetString(POSITION_SYMBOL);
+   if(setupID != "" && symbol!="")
    {
       for(int g = 0; g < gCount; g++)
       {
-         if(g_groups[g].setupID == setupID) return g;
+         if(g_groups[g].setupID == setupID && g_groups[g].symbol == symbol) return g;
       }
    }
 
@@ -5604,17 +5608,16 @@ void HealOpenAdvisorPositions(string sym)
       }
 
       bool loaded = false;
-      if(advSetupID != "") loaded = LoadAdvisorSetupTargets(advSetupID, sEntry, sSL, sTP1, sTP2, sTP3, sTP4, sType, sLegs);
-      if(!loaded && g_currentSignalID != "") loaded = LoadAdvisorSetupTargets("ADV_" + g_currentSignalID, sEntry, sSL, sTP1, sTP2, sTP3, sTP4, sType, sLegs);
+      if(advSetupID != "") loaded = LoadAdvisorSetupTargets(sym, advSetupID, sEntry, sSL, sTP1, sTP2, sTP3, sTP4, sType, sLegs);
+      if(!loaded && g_currentSignalID != "" && StringFind(cmt,SEGSShortSignalID(g_currentSignalID))>=0) loaded = LoadAdvisorSetupTargets(sym, "ADV_" + g_currentSignalID, sEntry, sSL, sTP1, sTP2, sTP3, sTP4, sType, sLegs);
 
-      double healSL = (curSL > 0.0) ? curSL : (loaded && sSL > 0.0 ? sSL : g_staticSL);
+      double healSL = (curSL > 0.0) ? curSL : (loaded && sSL > 0.0 ? sSL : 0.0);
       double healTP = curTP;
       if(healTP <= 0.0)
       {
          if(loaded)
             healTP = (leg == 1) ? sTP1 : ((leg == 2) ? sTP2 : ((leg == 3) ? sTP3 : sTP4));
-         else
-            healTP = (leg == 1) ? g_staticTP1 : ((leg == 2) ? g_staticTP2 : ((leg == 3) ? g_staticTP3 : g_staticTP4));
+
       }
 
       // Safe bounds validation
@@ -5773,7 +5776,7 @@ bool ApplyBreakevenToGroup(int g)
       ResetLastError();
       bool ok = trade.PositionModify(t, beSL, posInfo.TakeProfit());
       uint ret = trade.ResultRetcode();
-      if(!ok || (ret != TRADE_RETCODE_DONE && ret != TRADE_RETCODE_PLACED && ret != TRADE_RETCODE_NO_CHANGES))
+      if(ret != TRADE_RETCODE_NO_CHANGES && (!ok || (ret != TRADE_RETCODE_DONE && ret != TRADE_RETCODE_PLACED)))
       {
          PrintFormat("[SEGS BE] PositionModify to BE FAILED for leg #%I64u (%s) -> Target BE: %.5f | Retcode: %u (%s)",
                      t, sym, beSL, ret, trade.ResultRetcodeDescription());
@@ -6082,6 +6085,11 @@ bool IsPositionIdInGroup(ulong posId)
    return false;
 }
 // 11. Stable Signal ID Generation tied to trigger candle
+string SEGSShortSignalID(string signalID)
+{
+   return StringFormat("%08X%08X",SEGSHistoryHash(signalID),SEGSHistoryHash("ID:"+signalID));
+}
+
 string BuildStableSignalID(string sym, string dir, datetime triggerCandleTime, datetime pivotCandleTime)
 {
    datetime torontoConf = ConvertBrokerTimeToToronto(triggerCandleTime);
@@ -6214,7 +6222,7 @@ bool HasOpenAdvisorTradesForSignal(string sym, string signalID)
    if(CountOpenAdvisorTradesForSymbol(sym) == 0)
       return false;
 
-   string shortSig = (StringLen(signalID) > 16) ? StringSubstr(signalID, StringLen(signalID) - 16) : signalID;
+   string shortSig = SEGSShortSignalID(signalID);
 
    // Scan open positions on this symbol for matching signal tag
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -6325,17 +6333,17 @@ bool GetOpenAdvisorTradeDetails(string sym, string &outDir, double &outEntry, do
    ENUM_POSITION_TYPE rType;
    int rLegs = 4;
    bool recovered = false;
-   if(foundSetupID != "") recovered = LoadAdvisorSetupTargets(foundSetupID, rEntry, rSL, rTP1, rTP2, rTP3, rTP4, rType, rLegs);
-   if(!recovered && g_currentSignalID != "") recovered = LoadAdvisorSetupTargets("ADV_" + g_currentSignalID, rEntry, rSL, rTP1, rTP2, rTP3, rTP4, rType, rLegs);
+   if(foundSetupID != "") recovered = LoadAdvisorSetupTargets(sym, foundSetupID, rEntry, rSL, rTP1, rTP2, rTP3, rTP4, rType, rLegs);
+   if(!recovered && g_currentSignalID != "" && foundSetupID=="ADV_"+SEGSShortSignalID(g_currentSignalID)) recovered = LoadAdvisorSetupTargets(sym, "ADV_" + g_currentSignalID, rEntry, rSL, rTP1, rTP2, rTP3, rTP4, rType, rLegs);
 
    if(recovered)
    {
       if(outEntry <= 0.0 && rEntry > 0.0) outEntry = rEntry;
       if(outSL <= 0.0 && rSL > 0.0) outSL = rSL;
-      if(rTP1 > 0.0) outTP1 = rTP1;
-      if(rTP2 > 0.0) outTP2 = rTP2;
-      if(rTP3 > 0.0) outTP3 = rTP3;
-      if(rTP4 > 0.0) outTP4 = rTP4;
+      if(outTP1 <= 0.0 && rTP1 > 0.0) outTP1 = rTP1;
+      if(outTP2 <= 0.0 && rTP2 > 0.0) outTP2 = rTP2;
+      if(outTP3 <= 0.0 && rTP3 > 0.0) outTP3 = rTP3;
+      if(outTP4 <= 0.0 && rTP4 > 0.0) outTP4 = rTP4;
    }
    double pAtr = 20.0 * pipSize;
    double minSafeDist = MathMax(18.0 * pipSize, 0.40 * pAtr);
@@ -6370,37 +6378,6 @@ bool GetOpenAdvisorTradeDetails(string sym, string &outDir, double &outEntry, do
          else if(outTP3 == 0.0) outTP3 = collectedTPs[k];
          else if(outTP4 == 0.0) outTP4 = collectedTPs[k];
       }
-   }
-
-   // Absolute Guarantee: Stop loss distance CAN NEVER be larger than any Take-Profit distance!
-   if(outCount > 0 && outEntry > 0.0 && outSL > 0.0)
-   {
-      double rDist = MathAbs(outEntry - outSL);
-      if(pt <= 0.0) pt = SymbolInfoDouble(sym, SYMBOL_POINT);
-      if(pt <= 0.0) pt = 0.0001;
-      if(rDist <= 0.0) rDist = MathMax(20.0 * GetPipSize(sym), 20.0 * pt);
-      double minSep = MathMax(0.80 * rDist, 15.0 * pt);
-
-      if(outDir == "BUY")
-      {
-         if(outTP1 < outEntry + 1.20 * rDist) outTP1 = outEntry + 1.40 * rDist;
-         if(outTP2 < outTP1 + minSep || outTP2 < outEntry + 2.10 * rDist) outTP2 = outTP1 + MathMax(0.80 * rDist, minSep);
-         if(outTP3 < outTP2 + minSep || outTP3 < outEntry + 3.60 * rDist) outTP3 = outTP2 + MathMax(1.20 * rDist, minSep);
-         if(outTP4 < outTP3 + minSep || outTP4 < outEntry + 6.00 * rDist) outTP4 = outTP3 + MathMax(2.00 * rDist, minSep);
-      }
-      else
-      {
-         if(outTP1 > outEntry - 1.20 * rDist || outTP1 <= 0.0) outTP1 = outEntry - 1.40 * rDist;
-         if(outTP2 > outTP1 - minSep || outTP2 <= 0.0 || outTP2 > outEntry - 2.10 * rDist) outTP2 = outTP1 - MathMax(0.80 * rDist, minSep);
-         if(outTP3 > outTP2 - minSep || outTP3 <= 0.0 || outTP3 > outEntry - 3.60 * rDist) outTP3 = outTP2 - MathMax(1.20 * rDist, minSep);
-         if(outTP4 > outTP3 - minSep || outTP4 <= 0.0 || outTP4 > outEntry - 6.00 * rDist) outTP4 = outTP3 - MathMax(2.00 * rDist, minSep);
-      }
-
-      int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-      outTP1 = NormalizeDouble(NormalizePriceToTickSize(sym, outTP1), digits);
-      outTP2 = NormalizeDouble(NormalizePriceToTickSize(sym, outTP2), digits);
-      outTP3 = NormalizeDouble(NormalizePriceToTickSize(sym, outTP3), digits);
-      outTP4 = NormalizeDouble(NormalizePriceToTickSize(sym, outTP4), digits);
    }
 
    return (outCount > 0);
@@ -6518,7 +6495,7 @@ datetime GetAdvisorTradeExecutionTime(string sym, string signalID)
    if(CountOpenAdvisorTradesForSymbol(sym) == 0)
       return 0;
 
-   string shortSig = (StringLen(signalID) > 16) ? StringSubstr(signalID, StringLen(signalID) - 16) : signalID;
+   string shortSig = SEGSShortSignalID(signalID);
 
    // Authoritative: inspect open positions on this symbol matching advisor magic / comments
    for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -8865,6 +8842,26 @@ void UpdateH1OrderBlocks(bool forceScan=false)
 //+------------------------------------------------------------------+
 //| Evaluate 1-Hour (H1) Order Block Signal                          |
 //+------------------------------------------------------------------+
+int SEGSSelectEntryBlock(string sym, bool h1, bool buy, double atr)
+{
+   double ask=SymbolInfoDouble(sym,SYMBOL_ASK),bid=SymbolInfoDouble(sym,SYMBOL_BID);
+   double price=buy ? ask : bid,tick=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE);
+   int selected=-1; double nearest=1.0e100;
+   int count=h1 ? ArraySize(g_h1OrderBlocks) : ArraySize(g_orderBlocks);
+   for(int i=0; i<count; i++)
+   {
+      M30OrderBlock ob;
+      if(h1) ob=g_h1OrderBlocks[i]; else ob=g_orderBlocks[i];
+      if(ob.invalidated || ob.bullish!=buy) continue;
+      double entry=buy ? ob.high : ob.low;
+      double stop=buy ? ob.low-0.20*atr : ob.high+0.20*atr;
+      if(!SEGSEntryGeometry(buy,price,entry,stop,atr,tick,ask-bid,false)) continue;
+      double distance=MathAbs(price-entry);
+      if(distance<nearest) { nearest=distance; selected=i; }
+   }
+   return selected;
+}
+
 string EvaluateH1OBSignal(string sym, double &outLow, double &outHigh, datetime &outOrigin, int &outScore, string dir="BUY")
 {
    outLow = 0.0;
@@ -8893,7 +8890,7 @@ string EvaluateH1OBSignal(string sym, double &outLow, double &outHigh, datetime 
    double spreadDist = (double)SymbolInfoInteger(sym, SYMBOL_SPREAD) * SymbolInfoDouble(sym, SYMBOL_POINT) * 2.0;
    double entryProximity = MathMax(spreadDist + 2.0 * pip, 4.0 * pip);
 
-   int idx = (dir == "BUY") ? g_nearestBullishH1OB : g_nearestBearishH1OB;
+   int idx = SEGSSelectEntryBlock(sym,true,dir=="BUY",curAtr);
    if(idx < 0 || idx >= ArraySize(g_h1OrderBlocks))
    {
       return "NONE";
@@ -8907,7 +8904,7 @@ string EvaluateH1OBSignal(string sym, double &outLow, double &outHigh, datetime 
    if(curBid <= 0.0) curBid = iClose(sym, PERIOD_M1, 0);
    if(curAsk <= 0.0) curAsk = curBid;
 
-   double distance = (ob.bullish ? g_distanceToH1Demand : g_distanceToH1Supply);
+   double distance = MathAbs((ob.bullish ? curAsk : curBid)-(ob.bullish ? ob.high : ob.low));
 
    outLow = ob.low;
    outHigh = ob.high;
@@ -9149,7 +9146,7 @@ string EvaluateM30OBSignal(string sym, double &outLow, double &outHigh, datetime
    for(int p = 0; p < totalPasses; p++)
    {
       int pass = orderPasses[p];
-      int idx = (pass == 0 ? g_nearestBullishOB : g_nearestBearishOB);
+      int idx = SEGSSelectEntryBlock(sym,false,pass==0,curAtr);
       if(idx < 0 || idx >= ArraySize(g_orderBlocks)) continue;
 
       M30OrderBlock ob = g_orderBlocks[idx];
@@ -9161,7 +9158,7 @@ string EvaluateM30OBSignal(string sym, double &outLow, double &outHigh, datetime
       // When H1, H2, and H4 have confluence for a downtrend continuation, never look for a BUY (unless confirmed reversal)!
       if(isDowntrendConfluence && ob.bullish && !isReversalBull) continue;
 
-      double distance = (ob.bullish ? g_distanceToDemand : g_distanceToSupply);
+      double distance = MathAbs((ob.bullish ? curPriceAskCheck : curPriceBidCheck)-(ob.bullish ? ob.high : ob.low));
 
       // In trend continuation mode, expand the retest horizon to comfortably track and await
       // pullback to the 30M Order block even if price has extended ahead
@@ -9431,272 +9428,190 @@ double CalculateDirectEMA(string sym, ENUM_TIMEFRAMES tf, int period, int shift=
 //+------------------------------------------------------------------+
 //| Multi-Timeframe Trend & Structural Reversal Engine (H1, H2, H4)  |
 //+------------------------------------------------------------------+
+// All prices/tolerances come from the current symbol. Only completed bars confirm a setup.
+int SEGSStructureDirection(string sym, ENUM_TIMEFRAMES tf)
+{
+   MqlRates bars[]; ArraySetAsSeries(bars,true);
+   int copied=CopyRates(sym,tf,1,80,bars);
+   if(copied<15) return 0;
+   double high1=0,high2=0,low1=0,low2=0;
+   for(int i=2; i<copied-2; i++)
+   {
+      bool high=bars[i].high>bars[i-1].high && bars[i].high>bars[i-2].high && bars[i].high>=bars[i+1].high && bars[i].high>=bars[i+2].high;
+      bool low=bars[i].low<bars[i-1].low && bars[i].low<bars[i-2].low && bars[i].low<=bars[i+1].low && bars[i].low<=bars[i+2].low;
+      if(high) { if(high1==0) high1=bars[i].high; else if(high2==0) high2=bars[i].high; }
+      if(low) { if(low1==0) low1=bars[i].low; else if(low2==0) low2=bars[i].low; }
+      if(high2>0 && low2>0) break;
+   }
+   if(high2<=0 || low2<=0) return 0;
+   if(high1>high2 && low1>low2) return 1;
+   if(high1<high2 && low1<low2) return -1;
+   return 0;
+}
+
+string SEGSClosedTrend(string sym, ENUM_TIMEFRAMES tf, int fastHandle, int slowHandle, double &fast)
+{
+   fast=0;
+   double f[],s[];
+   if(fastHandle==INVALID_HANDLE || slowHandle==INVALID_HANDLE ||
+      CopyBuffer(fastHandle,0,1,1,f)!=1 || CopyBuffer(slowHandle,0,1,1,s)!=1) return "NEUTRAL";
+   fast=f[0];
+   double close=iClose(sym,tf,1);
+   if(!MathIsValidNumber(fast) || !MathIsValidNumber(s[0]) || fast<=0 || s[0]<=0 || close<=0) return "NEUTRAL";
+   int structure=SEGSStructureDirection(sym,tf);
+   if(structure>0) return "BULLISH";
+   if(structure<0) return "BEARISH";
+   if(fast>s[0] && close>s[0]) return "BULLISH";
+   if(fast<s[0] && close<s[0]) return "BEARISH";
+   return "NEUTRAL";
+}
+
+bool SEGSEntryGeometry(bool buy, double price, double entry, double stop, double atr, double tick, double spread, bool requireTouch)
+{
+   if(!MathIsValidNumber(price) || !MathIsValidNumber(entry) || !MathIsValidNumber(stop) ||
+      !MathIsValidNumber(atr) || !MathIsValidNumber(tick) || !MathIsValidNumber(spread) ||
+      price<=0 || entry<=0 || stop<=0 || atr<=0 || tick<=0 || spread<0) return false;
+   if(buy ? (stop>=entry || price<=stop) : (stop<=entry || price>=stop)) return false;
+   // Wide spreads must not turn a large chase into a valid zone touch.
+   if(spread>0.15*atr) return false;
+   double tolerance=MathMax(2.0*tick,MathMin(0.10*atr,MathMax(2.0*spread,0.02*atr)));
+   if(requireTouch) return MathAbs(price-entry)<=tolerance;
+   // Pending BUY plans sit below price; pending SELL plans sit above it.
+   // Limit distance to a nearby retest, never a remote stale level.
+   return buy ? (price>=entry-tolerance && price-entry<=0.50*atr)
+              : (price<=entry+tolerance && entry-price<=0.50*atr);
+}
+
+bool SEGSRejectionCandle(bool buy, double low, double high, double open, double close,
+                         double zoneLow, double zoneHigh, double tolerance)
+{
+   if(low<=0 || high<=low || open<=0 || close<=0 || zoneLow<=0 || zoneHigh<=zoneLow) return false;
+   if(low>zoneHigh+tolerance || high<zoneLow-tolerance) return false;
+   return buy ? (close>open && close>zoneHigh && low>=zoneLow-tolerance)
+              : (close<open && close<zoneLow && high<=zoneHigh+tolerance);
+}
+
+bool SEGSRecentZoneRejection(string sym, string dir, double low, double high, double atr)
+{
+   double tick=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE);
+   double tolerance=MathMax(2*tick,0.05*atr);
+   // Most recent completed M5 or M15 bar must actually overlap this exact zone.
+   ENUM_TIMEFRAMES frames[]={PERIOD_M5,PERIOD_M15};
+   for(int i=0; i<2; i++)
+      if(SEGSRejectionCandle(dir=="BUY",iLow(sym,frames[i],1),iHigh(sym,frames[i],1),
+         iOpen(sym,frames[i],1),iClose(sym,frames[i],1),low,high,tolerance)) return true;
+   return false;
+}
+
+bool SEGSConfirmedStructureShift(string sym, string dir, datetime zoneOrigin)
+{
+   MqlRates r[]; ArraySetAsSeries(r,true);
+   if(CopyRates(sym,PERIOD_M30,1,16,r)!=16 || r[0].time<=zoneOrigin) return false;
+   // Close through a confirmed local swing, not merely a wick or forming candle.
+   for(int i=3; i<14; i++)
+   {
+      if(r[i].time<=zoneOrigin) break;
+      if(dir=="BUY" && r[i].high>r[i-1].high && r[i].high>r[i-2].high && r[i].high>=r[i+1].high && r[i].high>=r[i+2].high)
+         return r[0].close>r[i].high && r[0].close>r[0].open;
+      if(dir=="SELL" && r[i].low<r[i-1].low && r[i].low<r[i-2].low && r[i].low<=r[i+1].low && r[i].low<=r[i+2].low)
+         return r[0].close<r[i].low && r[0].close<r[0].open;
+   }
+   return false;
+}
+
+bool SEGSAdvisorEntryGate(string sym, string dir, double entry, double stop, bool requireTouch, string &reason)
+{
+   reason="";
+   if(sym!=_Symbol || (dir!="BUY" && dir!="SELL")) { reason="INVALID SYMBOL / DIRECTION"; return false; }
+   if(!SEGSQuoteFresh(sym)) { reason="STALE / NO LIVE QUOTE"; return false; }
+   double values[];
+   if(g_hAtr_H1==INVALID_HANDLE || CopyBuffer(g_hAtr_H1,0,1,1,values)!=1 || values[0]<=0) { reason="WAITING FOR H1 ATR"; return false; }
+   double atr=values[0], tick=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE);
+   double bid=SymbolInfoDouble(sym,SYMBOL_BID), ask=SymbolInfoDouble(sym,SYMBOL_ASK);
+   double price=dir=="BUY" ? ask : bid;
+   if(!SEGSEntryGeometry(dir=="BUY",price,entry,stop,atr,tick,ask-bid,requireTouch))
+      { reason=requireTouch ? "WAIT FOR EXACT ENTRY RETEST / NO CHASING" : "INVALID OR MISSED PLANNED ENTRY"; return false; }
+   bool reversal=false; string direction="NONE"; double ema=0;
+   EvaluateMultiTimeframeTrendAndReversal(sym,g_h1Bias,g_h2Bias,g_h4Bias,g_overallBias,reversal,direction,ema);
+   double reversalEntry=0,reversalStop=0; int h1=0,m30=0;
+   if(!EvaluateTrendReversalConditions(sym,dir,reversalEntry,reversalStop,h1,m30,reason)) return false;
+   // Counter-trend confirmation must belong to this candidate, never a different nearby zone.
+   double tolerance=MathMax(2*tick,0.10*atr);
+   if(reason!="TREND ALIGNED" && MathAbs(reversalEntry-entry)>tolerance)
+      { reason="REVERSAL CONFIRMED ON A DIFFERENT ZONE"; return false; }
+   double zoneLow=0,zoneHigh=0;
+   bool found=false;
+   for(int pass=0; pass<2; pass++)
+   {
+      int count=pass==0 ? ArraySize(g_orderBlocks) : ArraySize(g_h1OrderBlocks);
+      for(int i=0; i<count; i++)
+      {
+         M30OrderBlock ob;
+         if(pass==0) ob=g_orderBlocks[i]; else ob=g_h1OrderBlocks[i];
+         if(ob.invalidated || ob.bullish!=(dir=="BUY")) continue;
+         if(entry<ob.low-tolerance || entry>ob.high+tolerance) continue;
+         zoneLow=ob.low; zoneHigh=ob.high; found=true; break;
+      }
+      if(found) break;
+   }
+   if(!found && g_activeEntryStrategy=="STRUCTURE_RETEST" && reason=="TREND ALIGNED")
+   {
+      double level=dir=="BUY" ? g_recentSupport : g_recentResistance;
+      if(level>0 && MathAbs(level-entry)<=tolerance)
+         { zoneLow=level-tick; zoneHigh=level+tick; found=true; }
+   }
+   if(!found) { reason="WAITING FOR ACTIVE ENTRY ORDER BLOCK / STRUCTURAL RETEST"; return false; }
+   // Do not enter directly into an opposing zone on either observation timeframe.
+   for(int pass=0; pass<2; pass++)
+   {
+      int count=pass==0 ? ArraySize(g_orderBlocks) : ArraySize(g_h1OrderBlocks);
+      for(int i=0; i<count; i++)
+      {
+         M30OrderBlock ob;
+         if(pass==0) ob=g_orderBlocks[i]; else ob=g_h1OrderBlocks[i];
+         if(ob.invalidated || ob.bullish==(dir=="BUY")) continue;
+         if(price>=ob.low-tolerance && price<=ob.high+tolerance)
+            { reason="ENTRY COLLIDES WITH OPPOSING ORDER BLOCK"; return false; }
+      }
+   }
+   if(requireTouch && !SEGSRecentZoneRejection(sym,dir,zoneLow,zoneHigh,atr))
+      { reason="WAITING FOR CLOSED-CANDLE REJECTION AT ENTRY ZONE"; return false; }
+   reason="DIRECTION, ZONE AND ENTRY CONFIRMED";
+   return true;
+}
+
+void SEGSReviewPendingAdvice()
+{
+   if(CountOpenAdvisorTradesForSymbol(_Symbol)>0) return; // Existing positions are historical executions, not fresh advice.
+   string dir=g_currentAdvisedAction;
+   if(dir!="BUY" && dir!="SELL") dir=g_plannedAction;
+   if(dir!="BUY" && dir!="SELL") return;
+   string reason="";
+   if(!SEGSAdvisorEntryGate(_Symbol,dir,g_staticEntryPrice,g_staticSL,false,reason))
+   {
+      g_hasViableEntry=false; g_currentAdvisedAction="NONE"; g_plannedAction="NONE";
+      g_setupState="SCANNING"; g_lastAdviceScanBarTime=0;
+      g_staticEntryPrice=0; g_staticSL=0; g_staticTP1=0; g_staticTP2=0; g_staticTP3=0; g_staticTP4=0;
+      g_obSignalDirection="NONE"; g_obSignalLow=0; g_obSignalHigh=0;
+      g_currentSignalID="";
+      g_blockReason=reason; g_primaryRejectionReason=reason; g_signalStatusLabel="SCANNING: "+reason;
+      ClearActiveSignalSnapshot(_Symbol); DeleteTradeAdviceLines();
+   }
+}
 void EvaluateMultiTimeframeTrendAndReversal(string sym,
-                                           string &outH1Bias,
-                                           string &outH2Bias,
-                                           string &outH4Bias,
-                                           string &outOverallBias,
-                                           bool   &outIsReversal,
-                                           string &outReversalDir,
-                                           double &outEma20Val)
+                                           string &outH1Bias, string &outH2Bias, string &outH4Bias,
+                                           string &outOverallBias, bool &outIsReversal,
+                                           string &outReversalDir, double &outEma20Val)
 {
    InitIndicatorHandles(sym);
-
-   double ma20_H1[], ma50_H1[];
-   double ma20_H2[], ma50_H2[];
-   double ma20_H4[], ma50_H4[];
-
-   ArraySetAsSeries(ma20_H1, true);
-   ArraySetAsSeries(ma50_H1, true);
-   ArraySetAsSeries(ma20_H2, true);
-   ArraySetAsSeries(ma50_H2, true);
-   ArraySetAsSeries(ma20_H4, true);
-   ArraySetAsSeries(ma50_H4, true);
-
-   double curBid = SymbolInfoDouble(sym, SYMBOL_BID);
-   if(curBid <= 0.0) curBid = iClose(sym, PERIOD_M1, 0);
-   if(curBid <= 0.0) curBid = iClose(sym, PERIOD_H1, 0);
-
-   // 1. H1 TACTICAL TREND & MOMENTUM
-   double h1Ema20 = 0.0, h1Ema50 = 0.0, h1Ema20_prev = 0.0;
-   if(g_hEma20_H1 != INVALID_HANDLE && g_hEma50_H1 != INVALID_HANDLE &&
-      CopyBuffer(g_hEma20_H1, 0, 1, 2, ma20_H1) == 2 &&
-      CopyBuffer(g_hEma50_H1, 0, 1, 2, ma50_H1) == 2)
-   {
-      h1Ema20      = ma20_H1[0];
-      h1Ema50      = ma50_H1[0];
-      h1Ema20_prev = ma20_H1[1];
-   }
-   else
-   {
-      h1Ema20      = CalculateDirectEMA(sym, PERIOD_H1, 20, 1);
-      h1Ema50      = CalculateDirectEMA(sym, PERIOD_H1, 50, 1);
-      h1Ema20_prev = CalculateDirectEMA(sym, PERIOD_H1, 20, 2);
-   }
-   outEma20Val = h1Ema20;
-
-   bool h1EmaBear   = (h1Ema20 < h1Ema50);
-   bool h1EmaBull   = (h1Ema20 > h1Ema50);
-   bool h1SlopeDown = (h1Ema20 <= h1Ema20_prev);
-   bool h1SlopeUp   = (h1Ema20 >= h1Ema20_prev);
-   double h1Close1  = iClose(sym, PERIOD_H1, 1);
-
-   bool h1Bull = false;
-   if(h1EmaBear && (curBid < h1Ema50 || h1Close1 < h1Ema50))
-   {
-      // Primary Downtrend on H1: A minor 1-candle bounce below EMA50 is a bounce, not a trend flip
-      h1Bull = (curBid > h1Ema20 && h1Close1 > h1Ema20 && h1SlopeUp && curBid > (h1Ema50 + h1Ema20) / 2.0);
-   }
-   else if(h1EmaBull && (curBid > h1Ema50 || h1Close1 > h1Ema50))
-   {
-      // Primary Uptrend on H1: A minor 1-candle dip above EMA50 is a pullback, not a downtrend
-      h1Bull = !(curBid < h1Ema20 && h1Close1 < h1Ema20 && h1SlopeDown && curBid < (h1Ema50 + h1Ema20) / 2.0);
-   }
-   else if(curBid < h1Ema20 && curBid < h1Ema50)
-   {
-      h1Bull = false;
-   }
-   else if(curBid > h1Ema20 && curBid > h1Ema50)
-   {
-      h1Bull = true;
-   }
-   else
-   {
-      h1Bull = (curBid >= h1Ema50) ? h1SlopeUp : (curBid > h1Ema20 && h1SlopeUp);
-   }
-
-   // 2. H2 INTERMEDIATE TREND & MOMENTUM
-   double h2Ema20 = 0.0, h2Ema50 = 0.0, h2Ema20_prev = 0.0;
-   bool h2Loaded = false;
-   if(g_hEma20_H2 != INVALID_HANDLE && g_hEma50_H2 != INVALID_HANDLE &&
-      CopyBuffer(g_hEma20_H2, 0, 1, 2, ma20_H2) == 2 &&
-      CopyBuffer(g_hEma50_H2, 0, 1, 2, ma50_H2) == 2)
-   {
-      h2Ema20      = ma20_H2[0];
-      h2Ema50      = ma50_H2[0];
-      h2Ema20_prev = ma20_H2[1];
-      if(h2Ema20 > 0.0 && h2Ema50 > 0.0) h2Loaded = true;
-   }
-   if(!h2Loaded)
-   {
-      h2Ema20      = CalculateDirectEMA(sym, PERIOD_H2, 20, 1);
-      h2Ema50      = CalculateDirectEMA(sym, PERIOD_H2, 50, 1);
-      h2Ema20_prev = CalculateDirectEMA(sym, PERIOD_H2, 20, 2);
-      if(h2Ema20 > 0.0 && h2Ema50 > 0.0) h2Loaded = true;
-   }
-   if(!h2Loaded)
-   {
-      // Precise mathematical H2 proxy from H1: 20 periods H2 = 40 periods H1, 50 periods H2 = 100 periods H1
-      h2Ema20      = CalculateDirectEMA(sym, PERIOD_H1, 40, 1);
-      h2Ema50      = CalculateDirectEMA(sym, PERIOD_H1, 100, 1);
-      h2Ema20_prev = CalculateDirectEMA(sym, PERIOD_H1, 40, 2);
-   }
-
-   bool h2EmaBear   = (h2Ema20 < h2Ema50);
-   bool h2EmaBull   = (h2Ema20 > h2Ema50);
-   bool h2SlopeDown = (h2Ema20 <= h2Ema20_prev);
-   bool h2SlopeUp   = (h2Ema20 >= h2Ema20_prev);
-   double h2Close1  = iClose(sym, PERIOD_H2, 1);
-   if(h2Close1 <= 0.0) h2Close1 = iClose(sym, PERIOD_H1, 1);
-
-   bool h2Bull = false;
-   if(h2EmaBear && (curBid < h2Ema50 || h2Close1 < h2Ema50))
-   {
-      // Primary Downtrend on H2
-      h2Bull = false;
-   }
-   else if(h2EmaBull && (curBid > h2Ema50 || h2Close1 > h2Ema50))
-   {
-      // Primary Uptrend on H2
-      h2Bull = true;
-   }
-   else if(curBid < h2Ema20 && curBid < h2Ema50)
-   {
-      // Price trading below both EMAs
-      h2Bull = false;
-   }
-   else if(curBid > h2Ema20 && curBid > h2Ema50)
-   {
-      // Price trading above both EMAs
-      h2Bull = true;
-   }
-   else
-   {
-      h2Bull = (curBid >= h2Ema50) ? h2SlopeUp : (curBid > h2Ema20 && h2SlopeUp);
-   }
-
-   // 3. H4 MACRO SWING STRUCTURE & TREND (Foundation)
-   double h4Ema20 = 0.0, h4Ema50 = 0.0, h4Ema20_prev = 0.0;
-   if(g_hEma20_H4 != INVALID_HANDLE && g_hEma50_H4 != INVALID_HANDLE &&
-      CopyBuffer(g_hEma20_H4, 0, 1, 2, ma20_H4) == 2 &&
-      CopyBuffer(g_hEma50_H4, 0, 1, 2, ma50_H4) == 2)
-   {
-      h4Ema20      = ma20_H4[0];
-      h4Ema50      = ma50_H4[0];
-      h4Ema20_prev = ma20_H4[1];
-   }
-   else
-   {
-      h4Ema20      = CalculateDirectEMA(sym, PERIOD_H4, 20, 1);
-      h4Ema50      = CalculateDirectEMA(sym, PERIOD_H4, 50, 1);
-      h4Ema20_prev = CalculateDirectEMA(sym, PERIOD_H4, 20, 2);
-   }
-
-   bool h4EmaBear   = (h4Ema20 < h4Ema50);
-   bool h4EmaBull   = (h4Ema20 > h4Ema50);
-   bool h4SlopeDown = (h4Ema20 <= h4Ema20_prev);
-   bool h4SlopeUp   = (h4Ema20 >= h4Ema20_prev);
-   double h4Close1  = iClose(sym, PERIOD_H4, 1);
-
-   // Scan H4 multi-bar swing structure over recent 30 bars:
-   // Bars 1..12 (recent swing) vs Bars 13..30 (prior swing)
-   double h4SwingHighRecent = 0.0, h4SwingHighPrior = 0.0;
-   double h4SwingLowRecent = 999999.0, h4SwingLowPrior = 999999.0;
-   for(int b = 1; b <= 12; b++)
-   {
-      double h = iHigh(sym, PERIOD_H4, b);
-      double l = iLow(sym, PERIOD_H4, b);
-      if(h > h4SwingHighRecent) h4SwingHighRecent = h;
-      if(l > 0.0 && l < h4SwingLowRecent) h4SwingLowRecent = l;
-   }
-   for(int b = 13; b <= 30; b++)
-   {
-      double h = iHigh(sym, PERIOD_H4, b);
-      double l = iLow(sym, PERIOD_H4, b);
-      if(h > h4SwingHighPrior) h4SwingHighPrior = h;
-      if(l > 0.0 && l < h4SwingLowPrior) h4SwingLowPrior = l;
-   }
-
-   bool h4HigherHighs = (h4SwingHighRecent > h4SwingHighPrior);
-   bool h4HigherLows  = (h4SwingLowRecent > h4SwingLowPrior);
-   bool h4LowerHighs  = (h4SwingHighRecent < h4SwingHighPrior);
-   bool h4LowerLows   = (h4SwingLowRecent < h4SwingLowPrior);
-
-   // Robust H4 Trend Determination
-   bool h4Bull = false;
-   if(h4EmaBear && (curBid < h4Ema50 || h4Close1 < h4Ema50))
-   {
-      // Primary Downtrend on H4: EMA20 < EMA50 and price trading below EMA50
-      h4Bull = false;
-   }
-   else if(h4EmaBull && (curBid > h4Ema50 || h4Close1 > h4Ema50))
-   {
-      // Primary Uptrend on H4: EMA20 > EMA50 and price trading above EMA50
-      h4Bull = true;
-   }
-   else if(curBid < h4Ema20 && curBid < h4Ema50)
-   {
-      // Price trading below both EMAs
-      h4Bull = false;
-   }
-   else if(curBid > h4Ema20 && curBid > h4Ema50)
-   {
-      // Price trading above both EMAs
-      h4Bull = true;
-   }
-   else if(h4LowerHighs && h4LowerLows)
-   {
-      // Structural Lower Highs + Lower Lows
-      h4Bull = false;
-   }
-   else if(h4HigherHighs && h4HigherLows)
-   {
-      // Structural Higher Highs + Higher Lows
-      h4Bull = true;
-   }
-   else
-   {
-      // Transition / chop: check price relative to 50 EMA and slope
-      h4Bull = (curBid >= h4Ema50) ? h4SlopeUp : (curBid > h4Ema20 && h4SlopeUp);
-   }
-
-   outH1Bias = h1Bull ? "BULLISH" : "BEARISH";
-   outH2Bias = h2Bull ? "BULLISH" : "BEARISH";
-   outH4Bias = h4Bull ? "BULLISH" : "BEARISH";
-
-   // 4. OVERALL CONFLUENCE & REVERSAL SYNTHESIS
-   if(!h4Bull && !h2Bull && !h1Bull)
-   {
-      outIsReversal  = false;
-      outReversalDir = "SELL";
-      outOverallBias = "BEARISH CONFLUENCE (H1/H2/H4)";
-   }
-   else if(!h4Bull && !h2Bull && h1Bull)
-   {
-      outIsReversal  = false;
-      outReversalDir = "SELL";
-      outOverallBias = "BEARISH DOWNTREND (H1 BOUNCE)";
-   }
-   else if(!h4Bull && (h2Bull || h1Bull))
-   {
-      outIsReversal  = false;
-      outReversalDir = "SELL";
-      outOverallBias = "BEARISH (H4 DOMINANT)";
-   }
-   else if(h4Bull && h2Bull && h1Bull)
-   {
-      outIsReversal  = false;
-      outReversalDir = "BUY";
-      outOverallBias = "BULLISH CONFLUENCE (H1/H2/H4)";
-   }
-   else if(h4Bull && h2Bull && !h1Bull)
-   {
-      outIsReversal  = false;
-      outReversalDir = "BUY";
-      outOverallBias = "BULLISH UPTREND (H1 PULLBACK)";
-   }
-   else if(h4Bull && (!h2Bull || !h1Bull))
-   {
-      outIsReversal  = false;
-      outReversalDir = "BUY";
-      outOverallBias = "BULLISH (H4 DOMINANT)";
-   }
-   else
-   {
-      outIsReversal  = false;
-      outReversalDir = "NONE";
-      outOverallBias = "NEUTRAL / CHOP";
-   }
+   double unused=0;
+   outH1Bias=SEGSClosedTrend(sym,PERIOD_H1,g_hEma20_H1,g_hEma50_H1,outEma20Val);
+   outH2Bias=SEGSClosedTrend(sym,PERIOD_H2,g_hEma20_H2,g_hEma50_H2,unused);
+   outH4Bias=SEGSClosedTrend(sym,PERIOD_H4,g_hEma20_H4,g_hEma50_H4,unused);
+   outIsReversal=false; outReversalDir="NONE";
+   outOverallBias="NEUTRAL / WAIT FOR CLOSED STRUCTURE";
+   if(outH4Bias=="BULLISH") { outReversalDir="BUY"; outOverallBias="BULLISH (CLOSED H4 STRUCTURE)"; }
+   else if(outH4Bias=="BEARISH") { outReversalDir="SELL"; outOverallBias="BEARISH (CLOSED H4 STRUCTURE)"; }
 }
 
 //+------------------------------------------------------------------+
@@ -9730,6 +9645,10 @@ bool IsPlannedEntryViable(string sym, string action, double entryPrice, double s
       outUnviableReason = "UNABLE TO RETRIEVE MARKET PRICE";
       return false;
    }
+
+   if((action!="BUY" && action!="SELL") || !MathIsValidNumber(entryPrice) || !MathIsValidNumber(slPrice) ||
+      (action=="BUY" ? slPrice>=entryPrice : slPrice<=entryPrice))
+   { outUnviableReason="INVALID DIRECTION OR STOP SIDE"; return false; }
 
    // 1. Positioning validity & Adverse Price Breach Check:
    // Entry must make directional sense relative to current price and Stop Loss.
@@ -9924,76 +9843,37 @@ bool TryReactivatePlannedEntry(string sym, string candDir, double curPrice, doub
 //+------------------------------------------------------------------+
 int CountOrderBlockBounceCycles(string sym, ENUM_TIMEFRAMES tf, double obLow, double obHigh, bool isBullish, double atrVal, double pipSize, int maxBars)
 {
-   if(obLow <= 0.0 || obHigh <= 0.0) return 0;
-
-   // 1. Retrieve persistent bounce memory across MT5 restart, reboot, or offline laptop
-   string cleanS = sym;
-   StringToUpper(cleanS);
-   string gvKey = StringFormat("SEGS_BNC_%s_%s_%.4f", (tf == PERIOD_H1 ? "H1" : "M30"), cleanS, obLow);
-   int savedBounces = GlobalVariableCheck(gvKey) ? (int)GlobalVariableGet(gvKey) : 0;
-
-   int bounces = 0;
-   double bounceTol = MathMax(0.25 * atrVal, 6.0 * pipSize);
-   double floorTol  = MathMax(0.35 * atrVal, 10.0 * pipSize);
-
-   int totalBars = iBars(sym, tf);
-   int scanBars = (totalBars > 1) ? MathMin(maxBars, totalBars - 1) : maxBars;
-
-   bool inZone = false;
-   for(int b = scanBars; b >= 1; b--)
+   if(obLow<=0 || obHigh<=obLow || atrVal<=0 || pipSize<=0) return 0;
+   double tick=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE);
+   if(tick<=0) return 0;
+   datetime confirmed=0;
+   for(int pass=0; pass<2; pass++)
    {
-      double bHigh  = iHigh(sym, tf, b);
-      double bLow   = iLow(sym, tf, b);
-      double bClose = iClose(sym, tf, b);
-
-      if(isBullish) // Demand Order Block
+      int count=pass==0 ? ArraySize(g_orderBlocks) : ArraySize(g_h1OrderBlocks);
+      for(int i=0; i<count; i++)
       {
-         bool touches = (bLow <= obHigh + bounceTol && bClose >= obLow - floorTol);
-         if(touches)
-         {
-            if(!inZone)
-            {
-               bounces++;
-               inZone = true;
-            }
-         }
-         else
-         {
-            if(bLow > obHigh + bounceTol * 0.3)
-            {
-               inZone = false; // Left zone and moved away
-            }
-         }
-      }
-      else // Supply Order Block
-      {
-         bool touches = (bHigh >= obLow - bounceTol && bClose <= obHigh + floorTol);
-         if(touches)
-         {
-            if(!inZone)
-            {
-               bounces++;
-               inZone = true;
-            }
-         }
-         else
-         {
-            if(bHigh < obLow - bounceTol * 0.3)
-            {
-               inZone = false; // Left zone and moved away
-            }
-         }
+         M30OrderBlock ob;
+         if(pass==0) ob=g_orderBlocks[i]; else ob=g_h1OrderBlocks[i];
+         if(!ob.invalidated && ob.bullish==isBullish && MathAbs(ob.low-obLow)<tick && MathAbs(ob.high-obHigh)<tick)
+            confirmed=(datetime)MathMax((long)confirmed,(long)ob.confirmTime);
       }
    }
-
-   // 2. Ensure bounce count is non-decreasing across terminal restarts & offline periods
-   int finalBounces = MathMax(bounces, savedBounces);
-   if(finalBounces > savedBounces || !GlobalVariableCheck(gvKey))
+   if(confirmed<=0) return 0;
+   MqlRates r[]; ArraySetAsSeries(r,true);
+   int count=CopyRates(sym,tf,1,MathMax(1,MathMin(1000,maxBars)),r);
+   if(count<1) return 0;
+   int bounces=0; bool leftZone=true;
+   double tolerance=MathMax(2*tick,0.05*atrVal);
+   for(int i=count-1; i>=0; i--)
    {
-      GlobalVariableSet(gvKey, (double)finalBounces);
-      GlobalVariablesFlush();
+      if(r[i].time<=confirmed) continue;
+      if(isBullish ? r[i].close<obLow-tolerance : r[i].close>obHigh+tolerance) return 0;
+      if(leftZone && SEGSRejectionCandle(isBullish,r[i].low,r[i].high,r[i].open,r[i].close,obLow,obHigh,tolerance))
+         { bounces++; leftZone=false; }
+      else if(isBullish ? r[i].low>obHigh+2*tolerance : r[i].high<obLow-2*tolerance) leftZone=true;
    }
-   return finalBounces;
+   // Rebuild from confirmed history; old persistent counts can never resurrect a broken zone.
+   return bounces;
 }
 
 //+------------------------------------------------------------------+
@@ -10007,304 +9887,51 @@ int CountOrderBlockBounceCycles(string sym, ENUM_TIMEFRAMES tf, double obLow, do
 //| 4 bounces of 30-Minute (M30) candles ON the Order Block zone!    |
 //| Applies at a system level to ALL traded instruments.             |
 //+------------------------------------------------------------------+
-bool EvaluateTrendReversalConditions(string sym,
-                                     string proposedDir,
-                                     double &outEntryPrice,
-                                     double &outStopLoss,
-                                     int &outH1Bounces,
-                                     int &outM30Bounces,
-                                     string &outReversalReason)
+bool EvaluateTrendReversalConditions(string sym, string proposedDir,
+                                     double &outEntryPrice, double &outStopLoss,
+                                     int &outH1Bounces, int &outM30Bounces, string &outReversalReason)
 {
-   outH1Bounces = 0;
-   outM30Bounces = 0;
-   outReversalReason = "";
-
-   double pipSize = GetPipSize(sym);
-   int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-   double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
-   if(pt <= 0.0) pt = 0.00001;
-
-   double curAtr = 0.0;
-   if(g_hAtr_H1 != INVALID_HANDLE)
+   outEntryPrice=0; outStopLoss=0; outH1Bounces=0; outM30Bounces=0;
+   outReversalReason="WAITING FOR CONFIRMED DIRECTION";
+   if(proposedDir!="BUY" && proposedDir!="SELL") return false;
+   if(g_h2Bias=="NEUTRAL" || g_h4Bias=="NEUTRAL") return false;
+   int wanted=proposedDir=="BUY" ? 1 : -1;
+   int h1=g_h1Bias=="BULLISH" ? 1 : (g_h1Bias=="BEARISH" ? -1 : 0);
+   int h4=g_h4Bias=="BULLISH" ? 1 : -1;
+   int structureH1=SEGSStructureDirection(sym,PERIOD_H1);
+   int structureM30=SEGSStructureDirection(sym,PERIOD_M30);
+   bool continuation=(wanted==h1 && wanted==h4 && structureH1!=-wanted && structureM30!=-wanted);
+   if(continuation) { outReversalReason="TREND ALIGNED"; return true; }
+   double atrBuf[];
+   if(g_hAtr_H1==INVALID_HANDLE || CopyBuffer(g_hAtr_H1,0,1,1,atrBuf)!=1 || atrBuf[0]<=0) return false;
+   double atr=atrBuf[0], pip=GetPipSize(sym), best=1.0e100;
+   double price=SymbolInfoDouble(sym,proposedDir=="BUY" ? SYMBOL_ASK : SYMBOL_BID);
+   M30OrderBlock selected; bool found=false;
+   for(int pass=0; pass<2; pass++)
    {
-      double atrBuf[];
-      ArraySetAsSeries(atrBuf, true);
-      if(CopyBuffer(g_hAtr_H1, 0, 1, 1, atrBuf) == 1) curAtr = atrBuf[0];
+      int count=pass==0 ? ArraySize(g_orderBlocks) : ArraySize(g_h1OrderBlocks);
+      for(int i=0; i<count; i++)
+      {
+         M30OrderBlock ob;
+         if(pass==0) ob=g_orderBlocks[i]; else ob=g_h1OrderBlocks[i];
+         if(ob.invalidated || ob.bullish!=(wanted==1) || ob.low<=0 || ob.high<=ob.low) continue;
+         double distance=MathAbs(price-(wanted==1 ? ob.high : ob.low));
+         if(distance<best) { best=distance; selected=ob; found=true; }
+      }
    }
-   if(curAtr <= 0.0) curAtr = 20.0 * pipSize;
-
-   double curPriceAsk = SymbolInfoDouble(sym, SYMBOL_ASK);
-   double curPriceBid = SymbolInfoDouble(sym, SYMBOL_BID);
-   if(curPriceBid <= 0.0) curPriceBid = iClose(sym, PERIOD_M1, 0);
-   if(curPriceAsk <= 0.0) curPriceAsk = curPriceBid;
-   double livePrice = (proposedDir == "BUY") ? curPriceAsk : curPriceBid;
-
-   // 1. Analyze Directional Confluence of H1, H2, and H4
-   bool h1Bull = (g_h1Bias == "BULLISH");
-   bool h2Bull = (g_h2Bias == "BULLISH");
-   bool h4Bull = (g_h4Bias == "BULLISH");
-
-   bool isFullBearConfluence = (!h1Bull && !h2Bull && !h4Bull);
-   bool isFullBullConfluence = (h1Bull && h2Bull && h4Bull);
-   bool isDowntrendConfluence = isFullBearConfluence || (!h1Bull && (!h2Bull || !h4Bull)) || (!h2Bull && !h4Bull);
-   bool isUptrendConfluence   = isFullBullConfluence || (h1Bull && (h2Bull || h4Bull)) || (h2Bull && h4Bull);
-
-   // Determine if proposed direction is Counter-Trend
-   bool isCounterTrendBuy  = (proposedDir == "BUY" && isDowntrendConfluence);
-   bool isCounterTrendSell = (proposedDir == "SELL" && isUptrendConfluence);
-
-   // If trade is aligned with trend confluence, no counter-trend reversal hurdle is required
-   if(!isCounterTrendBuy && !isCounterTrendSell)
-   {
-      outReversalReason = "TREND ALIGNED";
-      return true;
-   }
-
-   // 2. COUNTER-TREND REVERSAL RULE ENFORCEMENT:
-   // Counter-trend trade is STRICTLY PROHIBITED unless confirmed by:
-   // 3 bounces of 1-Hour (H1) candles OR 4 bounces of 30-Minute (M30) candles ON AN ORDER BLOCK!
-
-   if(isCounterTrendBuy)
-   {
-      // --- COUNTER-TREND BUY REVERSAL (against Downtrend) ---
-      // A. Check opposing Supply Zone collision: NEVER buy into or inside a Supply Zone!
-      if(g_obLocationWarning == "BUY INTO M30 SUPPLY" || g_obLocationWarning == "CHOP BETWEEN OB ZONES")
-      {
-         outReversalReason = "COUNTER-TREND BUY BLOCKED: Price is currently inside an opposing Supply Zone. Buying prohibited.";
-         return false;
-      }
-      if(g_nearestBearishOB >= 0 && g_nearestBearishOB < ArraySize(g_orderBlocks))
-      {
-         M30OrderBlock supOB = g_orderBlocks[g_nearestBearishOB];
-         if(!supOB.invalidated && livePrice >= supOB.low - 2.0 * pipSize && livePrice <= supOB.high + 2.0 * pipSize)
-         {
-            outReversalReason = StringFormat("COUNTER-TREND BUY BLOCKED: Price inside M30 Supply Zone [%.5f - %.5f]. Buying into supply prohibited.", supOB.low, supOB.high);
-            return false;
-         }
-      }
-
-      // B. Locate the active, unmitigated Demand Order Block
-      int targetOBIndex = -1;
-      bool isH1OB = false;
-      double bestDist = 999999.0;
-
-      for(int i = 0; i < ArraySize(g_orderBlocks); i++)
-      {
-         if(g_orderBlocks[i].invalidated || !g_orderBlocks[i].bullish) continue;
-         double dist = MathAbs(livePrice - g_orderBlocks[i].high);
-         if(dist < bestDist)
-         {
-            bestDist = dist;
-            targetOBIndex = i;
-            isH1OB = false;
-         }
-      }
-
-      if(targetOBIndex < 0)
-      {
-         for(int i = 0; i < ArraySize(g_h1OrderBlocks); i++)
-         {
-            if(g_h1OrderBlocks[i].invalidated || !g_h1OrderBlocks[i].bullish) continue;
-            double dist = MathAbs(livePrice - g_h1OrderBlocks[i].high);
-            if(dist < bestDist)
-            {
-               bestDist = dist;
-               targetOBIndex = i;
-               isH1OB = true;
-            }
-         }
-      }
-
-      if(targetOBIndex < 0)
-      {
-         outReversalReason = "COUNTER-TREND BUY BLOCKED: Bearish Confluence (H1/H2/H4). No valid Demand Order Block found to support a reversal.";
-         return false;
-      }
-
-      double obZoneLow  = isH1OB ? g_h1OrderBlocks[targetOBIndex].low  : g_orderBlocks[targetOBIndex].low;
-      double obZoneHigh = isH1OB ? g_h1OrderBlocks[targetOBIndex].high : g_orderBlocks[targetOBIndex].high;
-
-      // C. Count Bounces ON the Order Block zone using distinct bounce cycles:
-      // M30: 4 bounces on 30m OB (bounces, defends, moves away, returns to bounce 3 more times), executed on 5th candle!
-      // H1:  Bounces 1st time, leaves OB, returns and bounces 2 more times (total 3 bounces), executed on 4th candle!
-      int h1Bounces  = CountOrderBlockBounceCycles(sym, PERIOD_H1, obZoneLow, obZoneHigh, true, curAtr, pipSize, 48);
-      int m30Bounces = CountOrderBlockBounceCycles(sym, PERIOD_M30, obZoneLow, obZoneHigh, true, curAtr, pipSize, 72);
-
-      outH1Bounces = h1Bounces;
-      outM30Bounces = m30Bounces;
-
-      // Price must not have decisively closed below the Order Block floor (broken zone)
-      double floorBreakBuf = MathMax(0.35 * curAtr, 10.0 * pipSize);
-      double latestH1Close = iClose(sym, PERIOD_H1, 1);
-      double latestM30Close = iClose(sym, PERIOD_M30, 1);
-      if(latestH1Close < obZoneLow - floorBreakBuf && latestM30Close < obZoneLow - floorBreakBuf)
-      {
-         outReversalReason = StringFormat("COUNTER-TREND BUY BLOCKED: Price closed below Demand Order Block floor %s", DoubleToString(obZoneLow, digits));
-         return false;
-      }
-
-      // Check proximity to Demand Order Block zone:
-      bool isGBPUSDOrAUDUSD = (StringFind(sym, "GBPUSD") >= 0 || StringFind(sym, "AUDUSD") >= 0 || StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0 || StringFind(sym, "CHF") >= 0);
-      double maxAllowedOBDist = isGBPUSDOrAUDUSD ? MathMax(30.0 * pipSize, 0.85 * curAtr) : MathMax(0.50 * curAtr, 18.0 * pipSize);
-      bool isPriceAtOB = (livePrice >= obZoneLow - 6.0 * pipSize && livePrice <= obZoneHigh + maxAllowedOBDist);
-
-      // Confirmed Reversal Entry & Structural Stop Loss
-      double atrBuffer = MathMax(0.20 * curAtr, 6.0 * pipSize);
-      outEntryPrice = NormalizeDouble(obZoneHigh, digits);
-      outStopLoss   = NormalizeDouble(obZoneLow - atrBuffer, digits);
-      double minRisk = MathMax(18.0 * pipSize, 0.40 * curAtr);
-      if(outEntryPrice - outStopLoss < minRisk)
-         outStopLoss = NormalizeDouble(outEntryPrice - minRisk, digits);
-
-      // Strict Stop Loss Invariant: Stop Loss CAN NEVER equal Entry Price!
-      if(outStopLoss >= outEntryPrice - minRisk)
-         outStopLoss = NormalizeDouble(outEntryPrice - minRisk, digits);
-
-      // MANDATORY USER RULE FOR COUNTER-TREND REVERSAL:
-      // "Price had bounced on the zone several times and this should have signaled that a reversal trade was viable
-      // and a trade should have been executed at the beginning of the 5th bounce on a 30-minute chart"
-      bool isReversalBouncesConfirmed  = (h1Bounces >= 3 || m30Bounces >= 4 || (m30Bounces >= 3 && isPriceAtOB));
-
-      if(!isReversalBouncesConfirmed && !isPriceAtOB)
-      {
-         outReversalReason = StringFormat("COUNTER-TREND BUY AWAITING REVERSAL BOUNCES: Requires 3 H1 or 4 M30 bounces on Demand OB [%s - %s] (Found: %d/3 H1, %d/4 M30)",
-                                          DoubleToString(obZoneLow, digits), DoubleToString(obZoneHigh, digits),
-                                          h1Bounces, m30Bounces);
-         return false;
-      }
-
-      outReversalReason = StringFormat("SAFE TREND REVERSAL CONFIRMED: %s Demand OB [%s - %s] Defended (%d H1 / %d M30 Bounces)",
-                                       isH1OB ? "H1" : "M30",
-                                       DoubleToString(obZoneLow, digits), DoubleToString(obZoneHigh, digits),
-                                       h1Bounces, m30Bounces);
-      return true;
-   }
-   else if(isCounterTrendSell)
-   {
-      // --- COUNTER-TREND SELL REVERSAL (against Uptrend) ---
-      // A. Check opposing Demand Zone collision: NEVER sell into or inside a Demand Zone!
-      if(g_obLocationWarning == "SELL INTO M30 DEMAND" || g_obLocationWarning == "CHOP BETWEEN OB ZONES")
-      {
-         outReversalReason = "COUNTER-TREND SELL BLOCKED: Price is currently inside an opposing Demand Zone. Selling prohibited.";
-         return false;
-      }
-      if(g_nearestBullishOB >= 0 && g_nearestBullishOB < ArraySize(g_orderBlocks))
-      {
-         M30OrderBlock demOB = g_orderBlocks[g_nearestBullishOB];
-         if(!demOB.invalidated && livePrice >= demOB.low - 2.0 * pipSize && livePrice <= demOB.high + 2.0 * pipSize)
-         {
-            outReversalReason = StringFormat("COUNTER-TREND SELL BLOCKED: Price inside M30 Demand Zone [%.5f - %.5f]. Selling into demand prohibited.", demOB.low, demOB.high);
-            return false;
-         }
-      }
-
-      // B. Locate the active, unmitigated Supply Order Block
-      int targetOBIndex = -1;
-      bool isH1OB = false;
-      double bestDist = 999999.0;
-
-      for(int i = 0; i < ArraySize(g_orderBlocks); i++)
-      {
-         if(g_orderBlocks[i].invalidated || g_orderBlocks[i].bullish) continue;
-         double dist = MathAbs(livePrice - g_orderBlocks[i].low);
-         if(dist < bestDist)
-         {
-            bestDist = dist;
-            targetOBIndex = i;
-            isH1OB = false;
-         }
-      }
-
-      if(targetOBIndex < 0)
-      {
-         for(int i = 0; i < ArraySize(g_h1OrderBlocks); i++)
-         {
-            if(g_h1OrderBlocks[i].invalidated || g_h1OrderBlocks[i].bullish) continue;
-            double dist = MathAbs(livePrice - g_h1OrderBlocks[i].low);
-            if(dist < bestDist)
-            {
-               bestDist = dist;
-               targetOBIndex = i;
-               isH1OB = true;
-            }
-         }
-      }
-
-      if(targetOBIndex < 0)
-      {
-         outReversalReason = "COUNTER-TREND SELL BLOCKED: Bullish Confluence (H1/H2/H4). No valid Supply Order Block found to support a reversal.";
-         return false;
-      }
-
-      double obZoneLow  = isH1OB ? g_h1OrderBlocks[targetOBIndex].low  : g_orderBlocks[targetOBIndex].low;
-      double obZoneHigh = isH1OB ? g_h1OrderBlocks[targetOBIndex].high : g_orderBlocks[targetOBIndex].high;
-
-      // C. Count Bounces ON the Order Block zone using distinct bounce cycles:
-      // M30: 4 bounces on 30m OB (bounces, defends, moves away, returns to bounce 3 more times), executed on 5th candle!
-      // H1:  Bounces 1st time, leaves OB, returns and bounces 2 more times (total 3 bounces), executed on 4th candle!
-      int h1Bounces  = CountOrderBlockBounceCycles(sym, PERIOD_H1, obZoneLow, obZoneHigh, false, curAtr, pipSize, 48);
-      int m30Bounces = CountOrderBlockBounceCycles(sym, PERIOD_M30, obZoneLow, obZoneHigh, false, curAtr, pipSize, 72);
-
-      outH1Bounces = h1Bounces;
-      outM30Bounces = m30Bounces;
-
-      // Price must not have decisively closed above the Order Block ceiling (broken zone)
-      double ceilBreakBuf = MathMax(0.35 * curAtr, 10.0 * pipSize);
-      double latestH1Close = iClose(sym, PERIOD_H1, 1);
-      double latestM30Close = iClose(sym, PERIOD_M30, 1);
-      if(latestH1Close > obZoneHigh + ceilBreakBuf && latestM30Close > obZoneHigh + ceilBreakBuf)
-      {
-         outReversalReason = StringFormat("COUNTER-TREND SELL BLOCKED: Price closed above Supply Order Block ceiling %s", DoubleToString(obZoneHigh, digits));
-         return false;
-      }
-
-      // Check proximity to Supply Order Block zone:
-      bool isGBPUSDOrAUDUSD = (StringFind(sym, "GBPUSD") >= 0 || StringFind(sym, "AUDUSD") >= 0 || StringFind(sym, "XAU") >= 0 || StringFind(sym, "GOLD") >= 0 || StringFind(sym, "CHF") >= 0);
-      double maxAllowedOBDist = isGBPUSDOrAUDUSD ? MathMax(30.0 * pipSize, 0.85 * curAtr) : MathMax(0.50 * curAtr, 18.0 * pipSize);
-      bool isPriceAtOB = (livePrice <= obZoneHigh + 6.0 * pipSize && livePrice >= obZoneLow - maxAllowedOBDist);
-
-      // Confirmed Reversal Entry & Structural Stop Loss
-      double atrBuffer = MathMax(0.20 * curAtr, 6.0 * pipSize);
-      outEntryPrice = NormalizeDouble(obZoneLow, digits);
-      outStopLoss   = NormalizeDouble(obZoneHigh + atrBuffer, digits);
-      double minRisk = MathMax(18.0 * pipSize, 0.40 * curAtr);
-      if(outStopLoss - outEntryPrice < minRisk)
-         outStopLoss = NormalizeDouble(outEntryPrice + minRisk, digits);
-
-      // Strict Stop Loss Invariant: Stop Loss CAN NEVER equal Entry Price!
-      if(outStopLoss <= outEntryPrice + minRisk)
-         outStopLoss = NormalizeDouble(outEntryPrice + minRisk, digits);
-
-      // SYSTEM-LEVEL RULE FOR USDCHF & ALL INSTRUMENTS:
-      // When H1, H2, and H4 are Bullish, AND market structure has Higher Highs (HH):
-      // A Counter-Trend SELL is STRICTLY PROHIBITED at a system level!
-      // The system MUST be looking for a BUY setup when price pulls back into a viable buy zone (Demand OB / Support)!
-      if(isUptrendConfluence || (h1Bull && h2Bull && h4Bull) || g_hasHH_M30 || g_hasHH_H1 || g_marketStructure == "BULLISH")
-      {
-         outReversalReason = "COUNTER-TREND SELL STRICTLY PROHIBITED: H1, H2, H4 are Bullish with Higher High structure. System is seeking BUY pullback into demand.";
-         return false;
-      }
-
-      // MANDATORY USER RULE FOR COUNTER-TREND REVERSAL:
-      // "Price had bounced on the zone several times and this should have signaled that a reversal trade was viable
-      // and a trade should have been executed at the beginning of the 5th bounce on a 30-minute chart"
-      bool isReversalBouncesConfirmed = (h1Bounces >= 3 || m30Bounces >= 4);
-
-      if(!isReversalBouncesConfirmed)
-      {
-         outReversalReason = StringFormat("COUNTER-TREND SELL AWAITING REVERSAL BOUNCES: Requires 3 H1 or 4 M30 bounces on Supply OB [%s - %s] (Found: %d/3 H1, %d/4 M30)",
-                                          DoubleToString(obZoneLow, digits), DoubleToString(obZoneHigh, digits),
-                                          h1Bounces, m30Bounces);
-         return false;
-      }
-
-      outReversalReason = StringFormat("SAFE TREND REVERSAL CONFIRMED: %s Supply OB [%s - %s] Defended (%d H1 / %d M30 Bounces)",
-                                       isH1OB ? "H1" : "M30",
-                                       DoubleToString(obZoneLow, digits), DoubleToString(obZoneHigh, digits),
-                                       h1Bounces, m30Bounces);
-      return true;
-   }
-
+   if(!found) { outReversalReason="COUNTER-TREND: NO ACTIVE REVERSAL ORDER BLOCK"; return false; }
+   outH1Bounces=CountOrderBlockBounceCycles(sym,PERIOD_H1,selected.low,selected.high,wanted==1,atr,pip,288);
+   outM30Bounces=CountOrderBlockBounceCycles(sym,PERIOD_M30,selected.low,selected.high,wanted==1,atr,pip,576);
+   bool defended=outH1Bounces>=MathMax(3,InpReversalH1MinBounces) || outM30Bounces>=MathMax(4,InpReversalM30MinBounces);
+   if(!defended) { outReversalReason="COUNTER-TREND: WAIT FOR DISTINCT CONFIRMED OB BOUNCES"; return false; }
+   if(!SEGSConfirmedStructureShift(sym,proposedDir,selected.confirmTime))
+      { outReversalReason="COUNTER-TREND: WAIT FOR CLOSED M30 STRUCTURE BREAK"; return false; }
+   if(!SEGSRecentZoneRejection(sym,proposedDir,selected.low,selected.high,atr))
+      { outReversalReason="COUNTER-TREND: WAIT FOR CURRENT ZONE REJECTION"; return false; }
+   double buffer=MathMax(2*SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE),0.20*atr);
+   outEntryPrice=wanted==1 ? selected.high : selected.low;
+   outStopLoss=wanted==1 ? selected.low-buffer : selected.high+buffer;
+   outReversalReason="CONFIRMED ORDER BLOCK REVERSAL";
    return true;
 }
 
@@ -10608,33 +10235,11 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          g_staticSL = (activeTradeDir == "BUY") ? (g_staticEntryPrice - minSafeDistActive) : (g_staticEntryPrice + minSafeDistActive);
          g_staticSL = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticSL), digits);
       }
-      if(activeSafeTP1 > 0.0) g_staticTP1 = activeSafeTP1;
-      if(activeSafeTP2 > 0.0) g_staticTP2 = activeSafeTP2;
-      if(activeSafeTP3 > 0.0) g_staticTP3 = activeSafeTP3;
-      if(activeSafeTP4 > 0.0) g_staticTP4 = activeSafeTP4;
+      g_staticTP1 = activeSafeTP1;
+      g_staticTP2 = activeSafeTP2;
+      g_staticTP3 = activeSafeTP3;
+      g_staticTP4 = activeSafeTP4;
 
-      // Absolute Guarantee: Stop loss distance CAN NEVER be larger than any Take-Profit distance!
-      double aRisk = MathAbs(g_staticEntryPrice - g_staticSL);
-      if(aRisk <= 0.0) aRisk = MathMax(20.0 * pip, 20.0 * pt);
-      double mSep = MathMax(0.80 * aRisk, 15.0 * pt);
-      if(activeTradeDir == "BUY")
-      {
-         if(g_staticTP1 < g_staticEntryPrice + 1.20 * aRisk) g_staticTP1 = g_staticEntryPrice + 1.40 * aRisk;
-         if(g_staticTP2 < g_staticTP1 + mSep || g_staticTP2 < g_staticEntryPrice + 2.10 * aRisk) g_staticTP2 = g_staticTP1 + MathMax(0.80 * aRisk, mSep);
-         if(g_staticTP3 < g_staticTP2 + mSep || g_staticTP3 < g_staticEntryPrice + 3.60 * aRisk) g_staticTP3 = g_staticTP2 + MathMax(1.20 * aRisk, mSep);
-         if(g_staticTP4 < g_staticTP3 + mSep || g_staticTP4 < g_staticEntryPrice + 6.00 * aRisk) g_staticTP4 = g_staticTP3 + MathMax(2.00 * aRisk, mSep);
-      }
-      else if(activeTradeDir == "SELL")
-      {
-         if(g_staticTP1 > g_staticEntryPrice - 1.20 * aRisk || g_staticTP1 <= 0.0) g_staticTP1 = g_staticEntryPrice - 1.40 * aRisk;
-         if(g_staticTP2 > g_staticTP1 - mSep || g_staticTP2 <= 0.0 || g_staticTP2 > g_staticEntryPrice - 2.10 * aRisk) g_staticTP2 = g_staticTP1 - MathMax(0.80 * aRisk, mSep);
-         if(g_staticTP3 > g_staticTP2 - mSep || g_staticTP3 <= 0.0 || g_staticTP3 > g_staticEntryPrice - 3.60 * aRisk) g_staticTP3 = g_staticTP2 - MathMax(1.20 * aRisk, mSep);
-         if(g_staticTP4 > g_staticTP3 - mSep || g_staticTP4 <= 0.0 || g_staticTP4 > g_staticEntryPrice - 6.00 * aRisk) g_staticTP4 = g_staticTP3 - MathMax(2.00 * aRisk, mSep);
-      }
-      g_staticTP1 = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticTP1), digits);
-      g_staticTP2 = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticTP2), digits);
-      g_staticTP3 = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticTP3), digits);
-      g_staticTP4 = NormalizeDouble(NormalizePriceToTickSize(sym, g_staticTP4), digits);
       g_hasViableEntry = true;
       g_currentTradeTaken = true;
       g_isGateOpen = true;
@@ -13781,6 +13386,15 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       return;
    }
 
+   string entryGateReason="";
+   if(!SEGSAdvisorEntryGate(sym,g_currentAdvisedAction,g_staticEntryPrice,g_staticSL,true,entryGateReason))
+   {
+      g_blockReason=entryGateReason; g_autoExecDetail=entryGateReason;
+      g_hasViableEntry=false; g_setupState="WATCHING";
+      if(!isAutoTrade) Alert("[Trade Advisor] "+entryGateReason);
+      return;
+   }
+
    g_telemetry.ordersAttempted++;
    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
 
@@ -13825,7 +13439,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    double spreadPtsExec = (double)SymbolInfoInteger(sym, SYMBOL_SPREAD) * SymbolInfoDouble(sym, SYMBOL_POINT);
    double drift = MathAbs(curPrice - g_staticEntryPrice);
    double maxAllowedDrift = MathMax(0.75 * curAtr, MathMax(25.0 * pip, spreadPtsExec * 3.5));
-   if(drift > maxAllowedDrift && g_setupState != "TRIGGERED")
+   if(drift > maxAllowedDrift)
    {
       PrintFormat("[Trade Advisor] EXECUTION BLOCKED: Price drifted %.1f pips from entry (Max allowed: %.1f pips).",
                   drift / GetPipSize(sym), maxAllowedDrift / GetPipSize(sym));
@@ -14093,7 +13707,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    string pendingTimeKey = "SEGS_SIG_PENDING_TIME_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + g_currentSignalID;
    GlobalVariableSet(pendingTimeKey, (double)TimeCurrent());
 
-   string shortSig = (StringLen(g_currentSignalID) > 16) ? StringSubstr(g_currentSignalID, StringLen(g_currentSignalID) - 16) : g_currentSignalID;
+   string shortSig = SEGSShortSignalID(g_currentSignalID);
    ENUM_POSITION_TYPE ptype = (g_currentAdvisedAction == "BUY") ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
    SaveAdvisorSetupTargets("ADV_" + shortSig, sym, ptype, curPrice, g_staticSL, g_staticTP1, g_staticTP2, g_staticTP3, g_staticTP4, legsToExecute);
 
@@ -14149,6 +13763,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
          continue;
       }
 
+      if(!SEGSAdvisorEntryGate(sym,g_currentAdvisedAction,g_staticEntryPrice,g_staticSL,true,entryGateReason)) break;
       ResetLastError();
       bool ok = false;
       if(g_currentAdvisedAction == "BUY")
@@ -14170,6 +13785,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
          PrintFormat("[SEGS EXEC] Leg %d deferred: protection not valid at live quote", leg + 1);
          continue;
       }
+         if(!SEGSAdvisorEntryGate(sym,g_currentAdvisedAction,g_staticEntryPrice,g_staticSL,true,entryGateReason)) break;
          ResetLastError();
          if(g_currentAdvisedAction == "BUY")
             ok = trade.Buy(legLot, sym, sendPrice, legSL, legTP, comment);
@@ -14359,7 +13975,7 @@ void CheckAndAutoTradeAdvice()
    double pSize = GetPipSize(_Symbol);
    double cAtr = 20.0 * pSize;
    if(g_hAtr_H1 != INVALID_HANDLE) { double b[]; ArraySetAsSeries(b, true); if(CopyBuffer(g_hAtr_H1, 0, 1, 1, b) == 1) cAtr = b[0]; }
-   if(g_setupState != "TRIGGERED" && !IsPlannedEntryViable(_Symbol, g_currentAdvisedAction, g_staticEntryPrice, g_staticSL, curP, pSize, cAtr, unviableReason))
+   if(!IsPlannedEntryViable(_Symbol, g_currentAdvisedAction, g_staticEntryPrice, g_staticSL, curP, pSize, cAtr, unviableReason))
    {
       CancelUnviablePlannedEntry(_Symbol, "PRE-EXECUTION VIABILITY CHECK: " + unviableReason);
       g_setupState = "SCANNING";
@@ -14370,134 +13986,11 @@ void CheckAndAutoTradeAdvice()
       return;
    }
 
-   double entryDist = MathAbs(curP - g_staticEntryPrice);
-   double maxEntryExecDist = MathMax(0.50 * cAtr, 20.0 * pSize);
-
-   // Check if price is currently inside or touching an unmitigated Order Block zone in setup direction (both M30 & H1)
-   bool isInsideOrTouchingOB = false;
-   for(int k = 0; k < ArraySize(g_orderBlocks); k++)
+   string finalGateReason="";
+   if(!SEGSAdvisorEntryGate(_Symbol,g_currentAdvisedAction,g_staticEntryPrice,g_staticSL,true,finalGateReason))
    {
-      if(g_orderBlocks[k].invalidated) continue;
-      if(g_currentAdvisedAction == "SELL" && !g_orderBlocks[k].bullish)
-      {
-         if(curP <= g_orderBlocks[k].high + 6.0 * pSize && curP >= g_orderBlocks[k].low - MathMax(0.35 * cAtr, 12.0 * pSize))
-         {
-            isInsideOrTouchingOB = true;
-            break;
-         }
-      }
-      else if(g_currentAdvisedAction == "BUY" && g_orderBlocks[k].bullish)
-      {
-         if(curP >= g_orderBlocks[k].low - 6.0 * pSize && curP <= g_orderBlocks[k].high + MathMax(0.35 * cAtr, 12.0 * pSize))
-         {
-            isInsideOrTouchingOB = true;
-            break;
-         }
-      }
-   }
-   if(!isInsideOrTouchingOB)
-   {
-      for(int k = 0; k < ArraySize(g_h1OrderBlocks); k++)
-      {
-         if(g_h1OrderBlocks[k].invalidated) continue;
-         if(g_currentAdvisedAction == "SELL" && !g_h1OrderBlocks[k].bullish)
-         {
-            if(curP <= g_h1OrderBlocks[k].high + 6.0 * pSize && curP >= g_h1OrderBlocks[k].low - MathMax(0.35 * cAtr, 12.0 * pSize))
-            {
-               isInsideOrTouchingOB = true;
-               break;
-            }
-         }
-         else if(g_currentAdvisedAction == "BUY" && g_h1OrderBlocks[k].bullish)
-         {
-            if(curP >= g_h1OrderBlocks[k].low - 6.0 * pSize && curP <= g_h1OrderBlocks[k].high + MathMax(0.35 * cAtr, 12.0 * pSize))
-            {
-               isInsideOrTouchingOB = true;
-               break;
-            }
-         }
-      }
-   }
-
-   // Final Pre-Execution Gate: Directional Confluence & Chop Immunity Check (Bypassed if TRIGGERED setup already approved by strategy engine)
-   bool h1IsBull = (g_h1Bias == "BULLISH");
-   bool h4IsBull = (g_h4Bias == "BULLISH");
-   if(g_setupState != "TRIGGERED")
-   {
-      if(g_currentAdvisedAction == "BUY" && (!h1IsBull && !h4IsBull))
-      {
-         g_autoExecDetail = "BUY BLOCKED: HTF DOWNTREND (H1 & H4 BEAR)";
-         return;
-      }
-      if(g_currentAdvisedAction == "SELL" && (h1IsBull && h4IsBull))
-      {
-         g_autoExecDetail = "SELL BLOCKED: HTF UPTREND (H1 & H4 BULL)";
-         return;
-      }
-      if(g_marketStateClass == MARKET_STATE_CHOP)
-      {
-         g_autoExecDetail = "BLOCKED: MARKET IN CHOP / TRANSITION";
-         return;
-      }
-   }
-
-   // Touch and slippage allowance: must accommodate broker spread and fast volatility
-   double spreadPtsExec = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   if(pt <= 0.0) pt = 0.00001;
-
-   // Dynamic Volatility-Scaled Slippage Buffer:
-   double dynSlippageBuffer = MathMax(0.40 * cAtr, MathMax(12.0 * pSize, spreadPtsExec * 2.5));
-   maxEntryExecDist = MathMax(0.75 * cAtr, MathMax(25.0 * pSize, spreadPtsExec * 3.5));
-
-   // Configure trade deviation to prevent broker REQUOTE during fast volatility
-   ulong dynDeviation = (ulong)MathMax(150.0, MathMax(0.50 * cAtr / pt, spreadPtsExec * 3.0 / pt));
-   trade.SetDeviationInPoints(dynDeviation);
-
-   // Recent wick touch detection on M1: allows faster reaction time when price wicks into zone and bounces
-   double l0_M1 = iLow(_Symbol, PERIOD_M1, 0);
-   double l1_M1 = iLow(_Symbol, PERIOD_M1, 1);
-   double h0_M1 = iHigh(_Symbol, PERIOD_M1, 0);
-   double h1_M1 = iHigh(_Symbol, PERIOD_M1, 1);
-   double minRecentLow = MathMin(l0_M1, l1_M1);
-   double maxRecentHigh = MathMax(h0_M1, h1_M1);
-
-   double l0_M5 = iLow(_Symbol, PERIOD_M5, 0), l1_M5 = iLow(_Symbol, PERIOD_M5, 1);
-   double h0_M5 = iHigh(_Symbol, PERIOD_M5, 0), h1_M5 = iHigh(_Symbol, PERIOD_M5, 1);
-   double l0_M15 = iLow(_Symbol, PERIOD_M15, 0);
-   double h0_M15 = iHigh(_Symbol, PERIOD_M15, 0);
-   if(l0_M5 > 0.0) minRecentLow = MathMin(minRecentLow, l0_M5);
-   if(l1_M5 > 0.0) minRecentLow = MathMin(minRecentLow, l1_M5);
-   if(l0_M15 > 0.0) minRecentLow = MathMin(minRecentLow, l0_M15);
-   if(h0_M5 > 0.0) maxRecentHigh = MathMax(maxRecentHigh, h0_M5);
-   if(h1_M5 > 0.0) maxRecentHigh = MathMax(maxRecentHigh, h1_M5);
-   if(h0_M15 > 0.0) maxRecentHigh = MathMax(maxRecentHigh, h0_M15);
-
-   bool priceAtPlannedZone = false;
-   if(g_currentAdvisedAction == "BUY")
-   {
-      priceAtPlannedZone = (g_staticEntryPrice > 0.0 && 
-                           (curP <= g_staticEntryPrice + dynSlippageBuffer || minRecentLow <= g_staticEntryPrice + dynSlippageBuffer) &&
-                           (g_staticSL > 0.0 ? curP >= g_staticSL : true));
-   }
-   else if(g_currentAdvisedAction == "SELL")
-   {
-      priceAtPlannedZone = (g_staticEntryPrice > 0.0 && 
-                           (curP >= g_staticEntryPrice - dynSlippageBuffer || maxRecentHigh >= g_staticEntryPrice - dynSlippageBuffer) &&
-                           (g_staticSL > 0.0 ? curP <= g_staticSL : true));
-   }
-
-   bool isWithinSlippage = (g_staticEntryPrice > 0.0) && (entryDist <= dynSlippageBuffer || priceAtPlannedZone);
-
-   // Pre-execution execution distance check:
-   // If price is within slippageBuffer of planned entry, OR if setup is TRIGGERED and within safe distance, execute!
-   if(isWithinSlippage || (g_setupState == "TRIGGERED" && entryDist <= maxEntryExecDist) || isInsideOrTouchingOB)
-   {
-      // Planned entry touch confirmed: proceed to execution
-   }
-   else
-   {
-      g_autoExecDetail = StringFormat("AWAITING PULLBACK (Price %.1fp from entry %s)", entryDist / pSize, DoubleToString(g_staticEntryPrice, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)));
+      g_autoExecDetail=finalGateReason;
+      g_hasViableEntry=false; g_setupState="WATCHING";
       return;
    }
 
@@ -14538,7 +14031,7 @@ void CheckAndAutoTradeAdvice()
       else if(state == 1.0)
       {
          // If marked pending, verify whether positions actually exist on the account
-         string shortSig = (StringLen(g_currentSignalID) > 16) ? StringSubstr(g_currentSignalID, StringLen(g_currentSignalID) - 16) : g_currentSignalID;
+         string shortSig = SEGSShortSignalID(g_currentSignalID);
          bool foundPos = false;
          for(int p = PositionsTotal() - 1; p >= 0; p--)
          {
@@ -16078,7 +15571,6 @@ void DrawSentimentHUD()
    string sym = _Symbol;
    int symDigits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
 
-   ScanMarketStructureAndAdvice(false);
    UpdateUnifiedStrategyMatrix(sym);
 
    // Outer Background Panel (Strict Z-Order 30)
@@ -16120,8 +15612,9 @@ void DrawSentimentHUD()
    color mktCol  = g_isMarketOpen ? clrLime : clrTomato;
    CreateOrUpdateCell(PREFIX + "SNT_C1_MKT", sx + 14, c1Y + 17, mktStr, mktCol, 8, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
 
-   string feedStr = g_isTickDataFresh ? "FEED: LIVE" : "FEED: STALE";
-   color feedCol  = g_isTickDataFresh ? clrLime : clrTomato;
+   bool freshQuote=SEGSQuoteFresh(sym);
+   string feedStr = freshQuote ? "FEED: LIVE" : "FEED: STALE";
+   color feedCol  = freshQuote ? clrLime : clrTomato;
    CreateOrUpdateCell(PREFIX + "SNT_C1_DATA", sx + 130, c1Y + 17, feedStr, feedCol, 8, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
 
    string volStr = (g_liquidityState == "GOOD") ? "VOL: NORMAL" : ((g_liquidityState == "WEAK") ? "VOL: MODEST" : "VOL: THIN");
@@ -16132,8 +15625,9 @@ void DrawSentimentHUD()
    color sprdCol  = (g_spreadQualityRatio <= 1.8) ? clrLime : ((g_spreadQualityRatio <= 2.8) ? clrGold : clrTomato);
    CreateOrUpdateCell(PREFIX + "SNT_C1_SPRD", sx + cardW - 8, c1Y + 17, sprdStr, sprdCol, 8, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, InpFontName);
 
-   string gateStr = g_isGateOpen ? "GATE STATUS: CLEARED (Favorable Conditions for Execution)" : ("GATE BLOCKED: " + (g_gateBlockReason != "" ? g_gateBlockReason : "Filtered"));
-   color gateCol  = g_isGateOpen ? clrLime : clrTomato;
+   bool entryGateOpen=g_isGateOpen && freshQuote;
+   string gateStr = !freshQuote ? "GATE BLOCKED: STALE / NO LIVE QUOTE" : entryGateOpen ? "MARKET CHECKS PASSED - entry still requires direction / zone confirmation" : ("GATE BLOCKED: " + (g_gateBlockReason != "" ? g_gateBlockReason : "Filtered"));
+   color gateCol  = entryGateOpen ? clrLime : clrTomato;
    CreateOrUpdateCell(PREFIX + "SNT_C1_GATE", sx + 14, c1Y + 30, gateStr, gateCol, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
 
    // -------------------------------------------------------------
@@ -16323,7 +15817,7 @@ void DrawSentimentHUD()
       color actCol  = (g_currentAdvisedAction == "BUY") ? clrLime : clrTomato;
       if(isTradeTaken)
       {
-         actStr = StringFormat("POSITION ACTIVE [%s]", g_currentAdvisedAction);
+         actStr = StringFormat("EXISTING POSITION [%s] | SEEK %s", g_currentAdvisedAction, g_h4Bias=="BEARISH" ? "SELL" : (g_h4Bias=="BULLISH" ? "BUY" : "CONFIRMATION"));
       }
       else
       {
@@ -16490,7 +15984,7 @@ void DrawSentimentHUD()
             else if(tp1Hit)
                sigInfo = StringFormat("STATUS: %d Legs Active (TP2, TP3, TP4 In Play) | TP1 Banked (1.4R)%s | %s", openLegs, execPart, stratTag);
             else
-               sigInfo = StringFormat("STATUS: %d Safe Legs Running @ %s%s | Monitoring Targets | %s", openLegs, DoubleToString(g_staticEntryPrice, symDigits), execPart, stratTag);
+               sigInfo = StringFormat("STATUS: %d Existing Legs @ %s%s | Monitoring Targets | %s", openLegs, DoubleToString(g_staticEntryPrice, symDigits), execPart, stratTag);
          }
       }
       else
@@ -16693,7 +16187,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.78", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.79", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {

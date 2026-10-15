@@ -11,6 +11,17 @@ assert s.count('allowAutoTrade=false')==1
 hud=s.split('void DrawWinRateHUD()\n{',1)[1].split('void DeleteHelpHUD()',1)[0]
 assert not re.search(r'\btotalDeals\b',hud)
 assert 'StringFormat("%d Completed Setups", totalTradesClosed)' in hud
+# Every actual order path uses the same gate; rendering cannot recursively execute scans.
+execution=s.split('void ExecuteAdvisedTrade(bool isAutoTrade=false)\n{',1)[1].split('void CheckAndAutoTradeAdvice()\n{',1)[0]
+assert execution.count('SEGSAdvisorEntryGate(')==3
+assert 'if(drift > maxAllowedDrift)' in execution
+assert 'if(drift > maxAllowedDrift &&' not in execution
+sentiment=s.split('void DrawSentimentHUD()\n{',1)[1].split('void DeleteWinRateHUD()',1)[0]
+assert 'ScanMarketStructureAndAdvice(' not in sentiment
+assert 'SEGS_TRG_' not in s
+assert 'items[j].symbol == gSym && items[j].ptype == gType' in s
+assert 'unassigned[j].symbol == curSym && unassigned[j].ptype == curType' in s
+
 # Regression: removed GBPUSD branch must not leave either undeclared reference.
 assert not re.search(r'\bisGBPUSD\b', s)
 assert 'bestTP2 = 1.33200' not in s and 'bestTP3 = 1.33690' not in s

@@ -1,3 +1,7 @@
+# Current release: v3.79
+
+Use `SEGS_Trade_Manager_Pro_v3.79.mq5`. See [REPAIR-v3.79.md](REPAIR-v3.79.md) for system entry gates, confirmed reversals, cross-symbol target isolation, screenshot analysis and validation limits. Older versioned sources are compatibility copies. Earlier notes below are superseded by this report where they differ.
+
 v3.78 fixes the undeclared `totalDeals` HUD caption left in v3.77. Use `SEGS_Trade_Manager_Pro_v3.78.mq5`. Native MetaEditor compilation remains required.
 
 # Current repair: v3.77
