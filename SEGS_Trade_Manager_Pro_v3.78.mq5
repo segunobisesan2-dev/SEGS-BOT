@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.81 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.82 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.81"
+#property version   "3.82"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -1062,7 +1062,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.81 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.82 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1149,7 +1149,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.81 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.82 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -3363,6 +3363,8 @@ struct SEGSActiveDisplay
    double stopLow;
    double stopHigh;
    datetime opened;
+   datetime lastOpened;
+   bool legacy;
 };
 
 bool SEGSSelectedAdvisorPosition(string sym)
@@ -3388,7 +3390,14 @@ int SEGSReadActiveDisplay(string sym, SEGSActiveDisplay &rows[])
          string tail=StringSubstr(comment,start+9); int end=StringFind(tail,"|");
          if(end>0) key=StringSubstr(tail,0,end);
       }
-      if(key=="") key="POSITION_"+IntegerToString((long)posInfo.Identifier());
+      bool legacy=key=="";
+      if(legacy)
+      {
+         // Display aggregation only: old positions at the same entry are one price row,
+         // not a claim that their unrecoverable setup identities are identical.
+         int digits=(int)SymbolInfoInteger(sym,SYMBOL_DIGITS);
+         key="LEGACY_ENTRY_"+DoubleToString(posInfo.PriceOpen(),digits)+"_"+IntegerToString(posInfo.Magic());
+      }
       key+="|"+dir;
       int row=-1;
       for(int k=0; k<ArraySize(rows); k++) if(rows[k].key==key) { row=k; break; }
@@ -3400,11 +3409,13 @@ int SEGSReadActiveDisplay(string sym, SEGSActiveDisplay &rows[])
          rows[row].key=key; rows[row].direction=dir; rows[row].legs=0;
          rows[row].entryLow=entry; rows[row].entryHigh=entry;
          rows[row].stopLow=stop; rows[row].stopHigh=stop; rows[row].opened=(datetime)posInfo.Time();
+         rows[row].lastOpened=(datetime)posInfo.Time(); rows[row].legacy=legacy;
       }
       rows[row].legs++;
       rows[row].entryLow=MathMin(rows[row].entryLow,entry); rows[row].entryHigh=MathMax(rows[row].entryHigh,entry);
       rows[row].stopLow=MathMin(rows[row].stopLow,stop); rows[row].stopHigh=MathMax(rows[row].stopHigh,stop);
       rows[row].opened=(datetime)MathMin((long)rows[row].opened,(long)posInfo.Time());
+      rows[row].lastOpened=(datetime)MathMax((long)rows[row].lastOpened,(long)posInfo.Time());
    }
    return ArraySize(rows);
 }
@@ -15519,6 +15530,9 @@ void DeleteSentimentHUD()
 void DrawSentimentHUD()
 {
    if(!g_showSentimentHUD) return;
+   SEGSActiveDisplay activeRows[];
+   int activeCount=SEGSReadActiveDisplay(_Symbol,activeRows);
+   int activeRowExtra=activeCount>1 ? 28 : 0;
 
    int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
    int chartH = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
@@ -15527,7 +15541,7 @@ void DrawSentimentHUD()
 
    // Crisp, spacious & perfectly aligned HUD dimensions - Zero visual overlap
    int sw = 670;
-   int sh = 326;
+   int sh = 300+activeRowExtra;
    int sx = 20;
    int sy = 60;
 
@@ -15751,7 +15765,7 @@ void DrawSentimentHUD()
    // SECTION 3: TRADE SETUP & EXECUTION (Height: 92)
    // -------------------------------------------------------------
    int c3Y = c2Y + 50;
-   int c3H = 126;
+   int c3H = 100+activeRowExtra;
    CreateOrUpdatePanel(PREFIX + "SNT_C3_BG", sx + 8, c3Y, cardW, c3H, C'14,18,28', C'28,40,62', CORNER_LEFT_UPPER);
    CreateOrUpdateCell(PREFIX + "SNT_C3_H", sx + 14, c3Y + 4, "ADVISOR: ACTIVE BROKER POSITIONS + NEXT PLANNED SETUP", clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Arial Bold");
 
@@ -15759,8 +15773,7 @@ void DrawSentimentHUD()
    int btnAdvX = sx + cardW - btnAdvW - 8;
 
    // Broker state and the next candidate have separate rows and separate data sources.
-   SEGSActiveDisplay activeRows[];
-   int activeCount=SEGSReadActiveDisplay(sym,activeRows);
+
    bool hasPlan=SEGSHasDisplayPlan(sym);
    bool cbBlocked=false; string cbReason=""; int cbConsec=0,cbTotal=0;
    CheckCircuitBreaker(sym,cbBlocked,cbReason,cbConsec,cbTotal);
@@ -15770,27 +15783,31 @@ void DrawSentimentHUD()
       (isTradeTaken ? StringFormat("ACTIVE: %d OPEN ADVISOR POSITION(S)",openLegs) : "NO ACTIVE ADVISOR POSITION");
    CreateOrUpdateCell(PREFIX+"SNT_C3_ACT",sx+14,c3Y+16,activeStatus,isTradeTaken ? clrLime : clrSilver,8,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
    ObjectDelete(0,PREFIX+"SNT_C3_STP");
+   if(activeCount>2) CreateOrUpdateCell(PREFIX+"SNT_C3_STP",btnAdvX-12,c3Y+16,StringFormat("SHOWING 2 OF %d ENTRY GROUPS",activeCount),clrGold,7,ANCHOR_RIGHT_UPPER,CORNER_LEFT_UPPER,"Consolas");
    ObjectDelete(0,PREFIX+"SNT_C3_QUAL");
    for(int i=0; i<2; i++)
    {
       string name=PREFIX+"SNT_C3_ACTIVE_"+IntegerToString(i);
-      if(i>=activeCount) { ObjectDelete(0,name); continue; }
+      if(i>=activeCount) { ObjectDelete(0,name); ObjectDelete(0,name+"_TIME"); continue; }
       string entry=DoubleToString(activeRows[i].entryLow,symDigits);
       if(activeRows[i].entryHigh>activeRows[i].entryLow) entry+=".."+DoubleToString(activeRows[i].entryHigh,symDigits);
       string stop=activeRows[i].stopLow>0 ? DoubleToString(activeRows[i].stopLow,symDigits) : "NOT SET";
       if(activeRows[i].stopHigh>activeRows[i].stopLow) stop+=".."+DoubleToString(activeRows[i].stopHigh,symDigits);
-      string text="ACTIVE ENTRY "+activeRows[i].direction+": "+entry+" | SL: "+stop+" | "+IntegerToString(activeRows[i].legs)+" leg(s)";
-      CreateOrUpdateCell(name,sx+14,c3Y+31+i*14,text,clrWhite,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
+      string text="ACTIVE ENTRY "+(activeCount>1 ? "#"+IntegerToString(i+1)+" " : "")+activeRows[i].direction+": "+entry+" | SL: "+stop+" | "+IntegerToString(activeRows[i].legs)+" leg(s)";
+      CreateOrUpdateCell(name,sx+14,c3Y+31+i*28,text,clrWhite,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
+      string executed="EXECUTED: "+FormatExecutionTime(activeRows[i].opened,true);
+      if(activeRows[i].legacy && activeRows[i].lastOpened/60!=activeRows[i].opened/60)
+         executed="FILLS: "+FormatExecutionTime(activeRows[i].opened,true)+" to "+FormatExecutionTime(activeRows[i].lastOpened,true);
+      CreateOrUpdateCell(name+"_TIME",sx+14,c3Y+44+i*28,executed,clrAqua,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
    }
    string planned=hasPlan ? "NEXT PLANNED ENTRY "+g_currentAdvisedAction+": "+DoubleToString(g_staticEntryPrice,symDigits)+" | SL: "+DoubleToString(g_staticSL,symDigits) : "NEXT SETUP: SCANNING / NO PLANNED ENTRY";
-   CreateOrUpdateCell(PREFIX+"SNT_C3_LVL",sx+14,c3Y+61,planned,hasPlan ? clrGold : clrSilver,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
+   CreateOrUpdateCell(PREFIX+"SNT_C3_LVL",sx+14,c3Y+63+activeRowExtra,planned,hasPlan ? clrGold : clrSilver,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
    string nextState=cbBlocked ? "NEW ENTRIES PAUSED: CIRCUIT BREAKER" :
       (!freshQuote ? "NEW ENTRIES PAUSED: STALE QUOTE (ACTIVE POSITIONS REMAIN OPEN)" :
       (hasPlan ? "NEXT SETUP: "+g_setupState+" (NOT AN ACTIVE FILL)" : "MONITORING EXISTING POSITIONS / SCANNING NEW SETUP"));
-   CreateOrUpdateCell(PREFIX+"SNT_C3_TPS",sx+14,c3Y+76,nextState,clrAqua,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
-   string detail=activeCount>2 ? "More active setups: see per-ticket chart markings / Trade tab" : "Active prices and stops come from broker positions";
-   CreateOrUpdateCell(PREFIX+"SNT_C3_TP4",sx+14,c3Y+90,detail,clrSilver,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,InpFontName);
-   CreateOrUpdateCell(PREFIX+"SNT_C3_INF",sx+14,c3Y+104,"Existing entries remain ACTIVE through restart, recompile and stale feeds",C'130,150,180',7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
+   CreateOrUpdateCell(PREFIX+"SNT_C3_TPS",sx+14,c3Y+78+activeRowExtra,nextState,clrAqua,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
+   ObjectDelete(0,PREFIX+"SNT_C3_TP4");
+   ObjectDelete(0,PREFIX+"SNT_C3_INF");
 
    string alertBtnTxt = g_alertOnViableEntry ? "ALERTS: ON [O]" : "ALERTS: OFF [O]";
    color alertBtnBg   = g_alertOnViableEntry ? C'18,50,30' : C'40,20,20';
@@ -15832,7 +15849,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.81", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.82", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {

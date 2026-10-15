@@ -10,10 +10,12 @@ preamble=preamble.replace(' datetime Time(){return positions.at(selected).time;}
  double PriceOpen(){return positions.at(selected).entry;}double StopLoss(){return positions.at(selected).stop;}
  datetime Time(){return positions.at(selected).time;}''')
 preamble+='''
-const int POSITION_TYPE_BUY=0,POSITION_TYPE_SELL=1,SYMBOL_TRADE_TICK_SIZE=0;
+const int POSITION_TYPE_BUY=0,POSITION_TYPE_SELL=1,SYMBOL_TRADE_TICK_SIZE=0,SYMBOL_DIGITS=1;
 string g_currentSignalID="RESTORED_NDAQ",g_currentAdvisedAction="BUY",g_setupState="TRIGGERED";
 bool g_isSignalExpired=false;double g_staticEntryPrice=93.54,g_staticSL=89.89;
 datetime g_signalTriggerTime=1;
+long SymbolInfoInteger(string,int){return 5;}
+string DoubleToString(double n,int digits){char out[100];std::snprintf(out,sizeof(out),"%.*f",digits,n);return out;}
 double SymbolInfoDouble(string,int){return .01;}double MathAbs(double x){return std::abs(x);}
 '''
 def extract(name):
@@ -67,6 +69,16 @@ int main(){int checks=0;std::vector<SEGSActiveDisplay> rows;
  positions.clear();assert(SEGSReadActiveDisplay("USDCHF",rows)==0);checks++;
  // Ordinary unrelated manual trades are not silently relabeled as advisor fills.
  positions={{"NDAQ","",0,15,100}};assert(SEGSReadActiveDisplay("NDAQ",rows)==0);checks++;
+ // Screenshot: old four-leg entries without a recoverable setup tag produce ONE active price row.
+ positions.clear();for(int i=0;i<4;i++)positions.push_back({"USDJPY","[MyAdvisor]",123,20+i,100+i,0,158.363,157.398});
+ assert(SEGSReadActiveDisplay("USDJPY",rows)==1&&rows[0].legs==4&&rows[0].legacy);checks++;
+ assert(rows[0].opened==100&&rows[0].lastOpened==103);checks++;
+ // Distinct known setups with identical prices are intentionally preserved as separate setups.
+ positions={{"USDJPY",tag("first"),123,30,100,0,158.363,157.398},{"USDJPY",tag("second"),123,31,200,0,158.363,157.398}};
+ assert(SEGSReadActiveDisplay("USDJPY",rows)==2&&!rows[0].legacy&&!rows[1].legacy);checks++;
+ // Unknown legacy entries separated in time share a price row with an honest first/last fill range.
+ positions={{"USDJPY","[MyAdvisor]",123,40,100,0,158.363,157.398},{"USDJPY","[MyAdvisor]",123,41,90000,0,158.363,157.398}};
+ assert(SEGSReadActiveDisplay("USDJPY",rows)==1&&rows[0].opened==100&&rows[0].lastOpened==90000);checks++;
  std::cout<<checks<<" active/planned display assertions passed\n";
 }
 '''
@@ -77,8 +89,11 @@ with tempfile.TemporaryDirectory() as d:
 collector=extract('SEGSReadActiveDisplay')
 assert not any(x in collector for x in ['SEGSQuoteFresh','GetSafestStructuralStopLoss','HealOpenAdvisorPositions','trade.'])
 hud=s.split('void DrawSentimentHUD()\n{',1)[1].split('void DeleteWinRateHUD()',1)[0]
-assert 'SEGSReadActiveDisplay(sym,activeRows)' in hud
+assert 'SEGSReadActiveDisplay(_Symbol,activeRows)' in hud
 assert 'NO ACTIVE TRADE OPENED' not in hud
 assert 'bool isTradeTaken=activeCount>0;' in hud
 assert 'ACTIVE_ENTRY_' in s and 'NEXT PLANNED ENTRY' in s
 print('Broker status is independent of quotes and candidate state; native MT5 UI validation remains required.')
+
+assert 'FormatExecutionTime(activeRows[i].opened,true)' in hud
+assert 'ObjectDelete(0,name+"_TIME")' in hud

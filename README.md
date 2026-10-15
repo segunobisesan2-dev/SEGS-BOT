@@ -1,3 +1,7 @@
+# Current release: SEGS.mq5 (v3.82)
+
+See [REPAIR-v3.82.md](REPAIR-v3.82.md) for consolidated legacy active-entry rows and broker execution date/time in Toronto time. Use the same short SEGS.mq5 filename and compile with F7. Earlier notes below are superseded where they differ.
+
 # Current release: SEGS.mq5 (v3.81)
 
 See [REPAIR-v3.81.md](REPAIR-v3.81.md) for broker-based ACTIVE ENTRY status and separate NEXT PLANNED ENTRY status across all instruments. Same short filename; compile the updated existing file with F7. Second setups and bounded dual stops remain intact. Earlier release notes below are superseded where they differ.
