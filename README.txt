@@ -1,3 +1,7 @@
+# Current release: SEGS.mq5 (v3.81)
+
+See [REPAIR-v3.81.md](REPAIR-v3.81.md) for broker-based ACTIVE ENTRY status and separate NEXT PLANNED ENTRY status across all instruments. Same short filename; compile the updated existing file with F7. Second setups and bounded dual stops remain intact. Earlier release notes below are superseded where they differ.
+
 # Current release: SEGS.mq5 (v3.80)
 
 Use the short filename `SEGS.mq5`. See [REPAIR-v3.80.md](REPAIR-v3.80.md) for independent second setups, the bounded wick-first / institutional fallback stop policy, system settings and validation limits. Older filenames are compatibility copies. Earlier notes below are superseded where they differ.

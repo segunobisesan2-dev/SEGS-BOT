@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.80 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.81 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.80"
+#property version   "3.81"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -1053,6 +1053,7 @@ bool SEGSServiceDataStatus()
    ObjectSetInteger(0,name,OBJPROP_COLOR,clrTomato);
    ObjectSetInteger(0,name,OBJPROP_FONTSIZE,11);
    ObjectSetString(0,name,OBJPROP_TEXT,_Symbol+": "+status+" | last bid "+DoubleToString(SymbolInfoDouble(_Symbol,SYMBOL_BID),(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS)));
+   if(!ready) SEGSDrawActiveEntryLines(); // Actual fills do not need synchronized price history.
    return ready;
 }
 
@@ -1061,7 +1062,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.80 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.81 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1148,7 +1149,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.80 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.81 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -3282,7 +3283,7 @@ void DeleteTerminalObjects()
       if(StringFind(oName, PREFIX) == 0)
       {
          // Exclude Market Sentiment HUD, Trade Advice lines, Open Trade Markings, Win Rate HUD, Help HUD, and M30 OB Zones
-         if(StringFind(oName, PREFIX + "SNT_") == 0 || StringFind(oName, PREFIX + "TRDLINE_") == 0 ||
+         if(StringFind(oName, PREFIX + "SNT_") == 0 || StringFind(oName, PREFIX + "TRDLINE_") == 0 || StringFind(oName,PREFIX+"ACTIVE_ENTRY_")==0 ||
             StringFind(oName, PREFIX + "OTM_") == 0 ||
             StringFind(oName, PREFIX + "WR_") == 0 || StringFind(oName, PREFIX + "HLP_") == 0 ||
             StringFind(oName, PREFIX + "OB_") == 0)
@@ -3297,6 +3298,7 @@ void DeleteTerminalObjects()
 //+------------------------------------------------------------------+
 void DeleteTradeAdviceLines()
 {
+   if(!g_showTradeAdviceLines) ObjectsDeleteAll(0,PREFIX+"ACTIVE_ENTRY_");
    ObjectsDeleteAll(0, PREFIX + "TRDLINE_");
    ChartRedraw(0);
 }
@@ -3350,82 +3352,124 @@ void CreateChartTextTag(string name, datetime t, double price, string text, colo
    ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
 }
 
+// Read-only broker snapshot. Signal approval/pending flags are never evidence of a fill.
+struct SEGSActiveDisplay
+{
+   string key;
+   string direction;
+   int legs;
+   double entryLow;
+   double entryHigh;
+   double stopLow;
+   double stopHigh;
+   datetime opened;
+};
+
+bool SEGSSelectedAdvisorPosition(string sym)
+{
+   if(posInfo.Symbol()!=sym) return false;
+   string comment=posInfo.Comment();
+   return posInfo.Magic()==InpAdvisorMagicNumber || StringFind(comment,"SEGS|ADV|")>=0 ||
+      StringFind(comment,"[MyAdvisor]")>=0 || StringFind(comment,"[Advised")>=0;
+}
+
+int SEGSReadActiveDisplay(string sym, SEGSActiveDisplay &rows[])
+{
+   ArrayResize(rows,0);
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !posInfo.SelectByTicket(ticket) || !SEGSSelectedAdvisorPosition(sym)) continue;
+      string dir=posInfo.PositionType()==POSITION_TYPE_BUY ? "BUY" : "SELL";
+      string comment=posInfo.Comment(), key="";
+      int start=StringFind(comment,"SEGS|ADV|");
+      if(start>=0)
+      {
+         string tail=StringSubstr(comment,start+9); int end=StringFind(tail,"|");
+         if(end>0) key=StringSubstr(tail,0,end);
+      }
+      if(key=="") key="POSITION_"+IntegerToString((long)posInfo.Identifier());
+      key+="|"+dir;
+      int row=-1;
+      for(int k=0; k<ArraySize(rows); k++) if(rows[k].key==key) { row=k; break; }
+      double entry=posInfo.PriceOpen(), stop=posInfo.StopLoss();
+      if(row<0)
+      {
+         row=ArraySize(rows);
+         if(ArrayResize(rows,row+1)!=row+1) return -1;
+         rows[row].key=key; rows[row].direction=dir; rows[row].legs=0;
+         rows[row].entryLow=entry; rows[row].entryHigh=entry;
+         rows[row].stopLow=stop; rows[row].stopHigh=stop; rows[row].opened=(datetime)posInfo.Time();
+      }
+      rows[row].legs++;
+      rows[row].entryLow=MathMin(rows[row].entryLow,entry); rows[row].entryHigh=MathMax(rows[row].entryHigh,entry);
+      rows[row].stopLow=MathMin(rows[row].stopLow,stop); rows[row].stopHigh=MathMax(rows[row].stopHigh,stop);
+      rows[row].opened=(datetime)MathMin((long)rows[row].opened,(long)posInfo.Time());
+   }
+   return ArraySize(rows);
+}
+
+bool SEGSHasDisplayPlan(string sym)
+{
+   if(g_currentSignalID=="" || StringFind(g_currentSignalID,"RESTORED_")==0 || g_isSignalExpired || g_staticEntryPrice<=0 || g_staticSL<=0) return false;
+   string executionKey=SEGSExecutionKey(g_currentSignalID,false);
+   if(GlobalVariableCheck(executionKey) && GlobalVariableGet(executionKey)>=2.0) return false;
+   if(g_currentAdvisedAction!="BUY" && g_currentAdvisedAction!="SELL") return false;
+   if(g_setupState!="WATCHING" && g_setupState!="READY" && g_setupState!="TRIGGERED" && g_setupState!="PLANNED") return false;
+   if(HasOpenAdvisorTradesForSignal(sym,g_currentSignalID)) return false;
+   double tolerance=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE)*0.5;
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !posInfo.SelectByTicket(ticket) || !SEGSSelectedAdvisorPosition(sym)) continue;
+      string dir=posInfo.PositionType()==POSITION_TYPE_BUY ? "BUY" : "SELL";
+      // An old/restored snapshot of a filled entry must not become a new planned line.
+      if(dir==g_currentAdvisedAction && MathAbs(posInfo.PriceOpen()-g_staticEntryPrice)<=tolerance &&
+         (g_signalTriggerTime<=(datetime)posInfo.Time() || StringFind(g_currentSignalID,"RESTORED_")==0)) return false;
+   }
+   return true;
+}
+
+void SEGSDrawActiveEntryLines()
+{
+   // Dedicated names survive deletion of planned-only objects and update even with a stale quote.
+   ObjectsDeleteAll(0,PREFIX+"ACTIVE_ENTRY_");
+   if(!g_showTradeAdviceLines) return;
+   int digits=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   for(int i=PositionsTotal()-1; i>=0; i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !posInfo.SelectByTicket(ticket) || !SEGSSelectedAdvisorPosition(_Symbol)) continue;
+      string dir=posInfo.PositionType()==POSITION_TYPE_BUY ? "BUY" : "SELL";
+      string name=PREFIX+"ACTIVE_ENTRY_"+IntegerToString((long)ticket);
+      string text="ACTIVE ENTRY "+dir+" #"+IntegerToString((long)ticket)+": "+DoubleToString(posInfo.PriceOpen(),digits);
+      CreateChartHLine(name,posInfo.PriceOpen(),dir=="BUY" ? InpColorOpenBuyEntry : InpColorOpenSellEntry,STYLE_SOLID,2,text);
+      ObjectSetString(0,name,OBJPROP_TOOLTIP,text);
+      CreateChartTextTag(name+"_TAG",iTime(_Symbol,_Period,0),posInfo.PriceOpen(),text,dir=="BUY" ? InpColorOpenBuyEntry : InpColorOpenSellEntry);
+   }
+}
+
 void DrawTradeAdviceLines(double entry, double sl, double tp1, double tp2, double tp3, double tp4, int digits)
 {
-   if(!g_showTradeAdviceLines || entry <= 0.0 || sl <= 0.0)
-   {
-      DeleteTradeAdviceLines();
-      return;
-   }
-
-   ChartSetInteger(0, CHART_SHOW_OBJECT_DESCR, true);
-
-   bool isTradeTaken = IsAdvisorTradeTaken(_Symbol, g_currentSignalID);
-   string entLabel = isTradeTaken ? "🎯 ACTIVE ENTRY: " : "🎯 PLANNED ENTRY: ";
-   double pipSize = GetPipSize(_Symbol);
-   double slPips = (entry > 0.0 && sl > 0.0 && pipSize > 0.0) ? MathAbs(entry - sl) / pipSize : 0.0;
-   string slLabel = "🛑 SAFE STOP LOSS: " + DoubleToString(sl, digits) + (slPips > 0.0 ? " (-" + DoubleToString(slPips, 1) + " pips)" : "");
-
-   CreateChartHLine(PREFIX + "TRDLINE_SL",  sl,    C'239,68,68',  STYLE_DASH,    2, slLabel);
-   CreateChartHLine(PREFIX + "TRDLINE_ENT", entry, C'245,158,11', STYLE_DASHDOT, 2, entLabel + DoubleToString(entry, digits));
-
-   datetime tAnchor = iTime(_Symbol, _Period, 0);
-   if(tAnchor <= 0) tAnchor = TimeCurrent();
-
-   CreateChartTextTag(PREFIX + "TRDLINE_ENT_TAG", tAnchor, entry, entLabel + DoubleToString(entry, digits), C'245,158,11', "Trebuchet MS", 10);
-   CreateChartTextTag(PREFIX + "TRDLINE_SL_TAG",  tAnchor, sl,    slLabel, C'239,68,68',  "Trebuchet MS", 10);
-
-   // Standard Rule: Take profit information is hidden when no trade is opened.
-   // TP1-4 lines only display when a trade is active (isTradeTaken = true).
-   if(isTradeTaken)
-   {
-      CreateChartHLine(PREFIX + "TRDLINE_TP1", tp1,   C'16,185,129', STYLE_DASH,    1, "🏁 TP1 (1.4R FTA / 25% SCALE): " + DoubleToString(tp1, digits));
-      CreateChartHLine(PREFIX + "TRDLINE_TP2", tp2,   C'6,182,212',  STYLE_DASH,    1, "🔒 TP2 (2.8R / 25% + BE LOCK): " + DoubleToString(tp2, digits));
-      CreateChartHLine(PREFIX + "TRDLINE_TP3", tp3,   C'168,85,247', STYLE_DASH,    1, "🚀 TP3 (4.8R / 25% HTF POOL): " + DoubleToString(tp3, digits));
-      CreateChartHLine(PREFIX + "TRDLINE_TP4", tp4,   C'245,158,11', STYLE_DASH,    1, "🏆 TP4 (8.0R / 25% RUNNER): " + DoubleToString(tp4, digits));
-
-      CreateChartTextTag(PREFIX + "TRDLINE_TP1_TAG", tAnchor, tp1, "🏁 TP1: " + DoubleToString(tp1, digits), C'16,185,129', "Trebuchet MS", 9);
-      CreateChartTextTag(PREFIX + "TRDLINE_TP2_TAG", tAnchor, tp2, "🔒 TP2: " + DoubleToString(tp2, digits), C'6,182,212',  "Trebuchet MS", 9);
-      CreateChartTextTag(PREFIX + "TRDLINE_TP3_TAG", tAnchor, tp3, "🚀 TP3: " + DoubleToString(tp3, digits), C'168,85,247', "Trebuchet MS", 9);
-      CreateChartTextTag(PREFIX + "TRDLINE_TP4_TAG", tAnchor, tp4, "🏆 TP4: " + DoubleToString(tp4, digits), C'245,158,11', "Trebuchet MS", 9);
-   }
-   else
-   {
-      ObjectDelete(0, PREFIX + "TRDLINE_TP1");
-      ObjectDelete(0, PREFIX + "TRDLINE_TP2");
-      ObjectDelete(0, PREFIX + "TRDLINE_TP3");
-      ObjectDelete(0, PREFIX + "TRDLINE_TP4");
-      ObjectDelete(0, PREFIX + "TRDLINE_TP1_TAG");
-      ObjectDelete(0, PREFIX + "TRDLINE_TP2_TAG");
-      ObjectDelete(0, PREFIX + "TRDLINE_TP3_TAG");
-      ObjectDelete(0, PREFIX + "TRDLINE_TP4_TAG");
-   }
-
-   ChartRedraw(0);
+   // Keep signature for compatibility. Candidate TP values are not broker fills.
+   if(!g_showTradeAdviceLines || !SEGSHasDisplayPlan(_Symbol) || entry<=0 || sl<=0)
+   { DeleteTradeAdviceLines(); return; }
+   ChartSetInteger(0,CHART_SHOW_OBJECT_DESCR,true);
+   string label="NEXT PLANNED ENTRY "+g_currentAdvisedAction+": "+DoubleToString(entry,digits);
+   CreateChartHLine(PREFIX+"TRDLINE_ENT",entry,C'245,158,11',STYLE_DASHDOT,2,label);
+   CreateChartHLine(PREFIX+"TRDLINE_SL",sl,C'245,158,11',STYLE_DASH,1,"PLANNED SL: "+DoubleToString(sl,digits));
+   CreateChartTextTag(PREFIX+"TRDLINE_ENT_TAG",iTime(_Symbol,_Period,0),entry,label,C'245,158,11');
+   CreateChartTextTag(PREFIX+"TRDLINE_SL_TAG",iTime(_Symbol,_Period,0),sl,"PLANNED SL: "+DoubleToString(sl,digits),C'245,158,11');
 }
 
 void UpdateTradeAdviceLines()
 {
-   if(!g_showTradeAdviceLines)
-   {
-      DeleteTradeAdviceLines();
-      return;
-   }
-
-   bool isTradeTaken = IsAdvisorTradeTaken(_Symbol, g_currentSignalID);
-   bool hasPlannedSetup = (g_staticEntryPrice > 0.0 && g_staticSL > 0.0 && !g_isSignalExpired && g_setupState != "CANCELLED" && g_setupState != "UNVIABLE");
-
-   // CRITICAL SYSTEM FIX: Planned Entry and Safe Stop Loss lines MUST be visible on chart
-   // whenever a planned entry is waiting/watching (g_setupState == "WATCHING"),
-   // ready/triggered (g_hasViableEntry), or actively running (isTradeTaken)!
-   if(!hasPlannedSetup && !isTradeTaken)
-   {
-      DeleteTradeAdviceLines();
-      return;
-   }
-
-   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-   DrawTradeAdviceLines(g_staticEntryPrice, g_staticSL, g_staticTP1, g_staticTP2, g_staticTP3, g_staticTP4, digits);
+   SEGSDrawActiveEntryLines();
+   if(!g_showTradeAdviceLines || !SEGSHasDisplayPlan(_Symbol))
+   { DeleteTradeAdviceLines(); return; }
+   // Remove any old synthetic active/candidate TP objects from earlier versions.
+   DeleteTradeAdviceLines();
+   DrawTradeAdviceLines(g_staticEntryPrice,g_staticSL,g_staticTP1,g_staticTP2,g_staticTP3,g_staticTP4,(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS));
 }
 
 //+------------------------------------------------------------------+
@@ -3486,7 +3530,7 @@ void UpdateOpenTradeMarkings()
       if(ticket <= 0) continue;
       if(!posInfo.SelectByTicket(ticket)) continue;
 
-      if(!IsSameChartAsset(posInfo.Symbol(), _Symbol)) continue;
+      if(posInfo.Symbol()!=_Symbol) continue;
 
       long magic = posInfo.Magic();
       string comment = posInfo.Comment();
@@ -3522,7 +3566,7 @@ void UpdateOpenTradeMarkings()
       // 1. On-Chart Entry Line
       string entName = PREFIX + "OTM_ENT_" + IntegerToString(ticket);
       color entCol = (type == POSITION_TYPE_BUY) ? InpColorOpenBuyEntry : InpColorOpenSellEntry;
-      string entDesc = StringFormat("🎯 [ADVISOR %s #%I64u] %.2fL @ %s | Float: %s",
+      string entDesc = StringFormat("🎯 [ACTIVE ENTRY %s #%I64u] %.2fL @ %s | Float: %s",
                                     (type == POSITION_TYPE_BUY ? "BUY" : "SELL"),
                                     ticket, volume, DoubleToString(openPrice, digits), pnlStr);
       CreateOpenTradeHLine(entName, openPrice, entCol, STYLE_SOLID, 2, entDesc);
@@ -14524,7 +14568,7 @@ void DrawOpenTradesMarkingsTab(int mx, int curY, int mw, ENUM_BASE_CORNER mc)
    {
       ulong t = PositionGetTicket(p);
       if(t <= 0 || !posInfo.SelectByTicket(t)) continue;
-      if(!IsSameChartAsset(posInfo.Symbol(), _Symbol)) continue;
+      if(posInfo.Symbol()!=_Symbol) continue;
       long magic = posInfo.Magic();
       string comment = posInfo.Comment();
       bool isAdvisor = (magic == InpAdvisorMagicNumber || 
@@ -15483,7 +15527,7 @@ void DrawSentimentHUD()
 
    // Crisp, spacious & perfectly aligned HUD dimensions - Zero visual overlap
    int sw = 670;
-   int sh = 286;
+   int sh = 326;
    int sx = 20;
    int sy = 60;
 
@@ -15707,385 +15751,55 @@ void DrawSentimentHUD()
    // SECTION 3: TRADE SETUP & EXECUTION (Height: 92)
    // -------------------------------------------------------------
    int c3Y = c2Y + 50;
-   int c3H = 92;
+   int c3H = 126;
    CreateOrUpdatePanel(PREFIX + "SNT_C3_BG", sx + 8, c3Y, cardW, c3H, C'14,18,28', C'28,40,62', CORNER_LEFT_UPPER);
-   CreateOrUpdateCell(PREFIX + "SNT_C3_H", sx + 14, c3Y + 4, StringFormat("ADVISOR: %d/%d OPEN SETUPS | NEW SETUP: 4 LEGS",CountOpenAdvisorSetsForSymbol(sym),MathMax(1,InpMaxSetsPerSymbol)), clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Arial Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_C3_H", sx + 14, c3Y + 4, "ADVISOR: ACTIVE BROKER POSITIONS + NEXT PLANNED SETUP", clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Arial Bold");
 
    int btnAdvW = 126;
    int btnAdvX = sx + cardW - btnAdvW - 8;
 
-   double riskDist = MathAbs(g_staticEntryPrice - g_staticSL);
-   double rewardDist = (g_staticTP4 > 0.0) ? MathAbs(g_staticTP4 - g_staticEntryPrice) : 0.0;
-   string rrRatioStr = (riskDist > 0.0) ? StringFormat("1:%.1f", rewardDist / riskDist) : "1:3.0";
-
-   // Consecutive-Loss Circuit Breaker check
-   bool cbBlocked = false;
-   string cbReason = "";
-   int cbConsec = 0, cbTotal = 0;
-   CheckCircuitBreaker(sym, cbBlocked, cbReason, cbConsec, cbTotal);
-
-   int openLegs = CountOpenAdvisorTradesForSymbol(sym);
-   bool isTradeTaken = HasOpenAdvisorTradesForSignal(sym,g_currentSignalID);
-
-   datetime execDt = 0;
-   if(isTradeTaken)
+   // Broker state and the next candidate have separate rows and separate data sources.
+   SEGSActiveDisplay activeRows[];
+   int activeCount=SEGSReadActiveDisplay(sym,activeRows);
+   bool hasPlan=SEGSHasDisplayPlan(sym);
+   bool cbBlocked=false; string cbReason=""; int cbConsec=0,cbTotal=0;
+   CheckCircuitBreaker(sym,cbBlocked,cbReason,cbConsec,cbTotal);
+   int openLegs=CountOpenAdvisorTradesForSymbol(sym);
+   bool isTradeTaken=activeCount>0;
+   string activeStatus=activeCount<0 ? "ACTIVE POSITION DATA UNAVAILABLE" :
+      (isTradeTaken ? StringFormat("ACTIVE: %d OPEN ADVISOR POSITION(S)",openLegs) : "NO ACTIVE ADVISOR POSITION");
+   CreateOrUpdateCell(PREFIX+"SNT_C3_ACT",sx+14,c3Y+16,activeStatus,isTradeTaken ? clrLime : clrSilver,8,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
+   ObjectDelete(0,PREFIX+"SNT_C3_STP");
+   ObjectDelete(0,PREFIX+"SNT_C3_QUAL");
+   for(int i=0; i<2; i++)
    {
-      execDt = GetAdvisorTradeExecutionTime(sym, g_currentSignalID);
-      if(execDt <= 0 && openLegs > 0)
-      {
-         for(int p = PositionsTotal() - 1; p >= 0; p--)
-         {
-            ulong tk = PositionGetTicket(p);
-            if(tk > 0 && posInfo.SelectByTicket(tk) && IsSameChartAsset(posInfo.Symbol(), sym))
-            {
-               long mgc = posInfo.Magic();
-               string cmt = posInfo.Comment();
-               if(mgc == InpAdvisorMagicNumber || StringFind(cmt, "SEGS|ADV") >= 0 || StringFind(cmt, "[MyAdvisor]") >= 0 || StringFind(cmt, "[Advised") >= 0)
-               {
-                  datetime pt = (datetime)posInfo.Time();
-                  if(execDt == 0 || (pt > 0 && pt < execDt)) execDt = pt;
-               }
-            }
-         }
-      }
+      string name=PREFIX+"SNT_C3_ACTIVE_"+IntegerToString(i);
+      if(i>=activeCount) { ObjectDelete(0,name); continue; }
+      string entry=DoubleToString(activeRows[i].entryLow,symDigits);
+      if(activeRows[i].entryHigh>activeRows[i].entryLow) entry+=".."+DoubleToString(activeRows[i].entryHigh,symDigits);
+      string stop=activeRows[i].stopLow>0 ? DoubleToString(activeRows[i].stopLow,symDigits) : "NOT SET";
+      if(activeRows[i].stopHigh>activeRows[i].stopLow) stop+=".."+DoubleToString(activeRows[i].stopHigh,symDigits);
+      string text="ACTIVE ENTRY "+activeRows[i].direction+": "+entry+" | SL: "+stop+" | "+IntegerToString(activeRows[i].legs)+" leg(s)";
+      CreateOrUpdateCell(name,sx+14,c3Y+31+i*14,text,clrWhite,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
    }
-   string execTimeStr = (execDt > 0) ? FormatExecutionTime(execDt, true) : "";
+   string planned=hasPlan ? "NEXT PLANNED ENTRY "+g_currentAdvisedAction+": "+DoubleToString(g_staticEntryPrice,symDigits)+" | SL: "+DoubleToString(g_staticSL,symDigits) : "NEXT SETUP: SCANNING / NO PLANNED ENTRY";
+   CreateOrUpdateCell(PREFIX+"SNT_C3_LVL",sx+14,c3Y+61,planned,hasPlan ? clrGold : clrSilver,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas Bold");
+   string nextState=cbBlocked ? "NEW ENTRIES PAUSED: CIRCUIT BREAKER" :
+      (!freshQuote ? "NEW ENTRIES PAUSED: STALE QUOTE (ACTIVE POSITIONS REMAIN OPEN)" :
+      (hasPlan ? "NEXT SETUP: "+g_setupState+" (NOT AN ACTIVE FILL)" : "MONITORING EXISTING POSITIONS / SCANNING NEW SETUP"));
+   CreateOrUpdateCell(PREFIX+"SNT_C3_TPS",sx+14,c3Y+76,nextState,clrAqua,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
+   string detail=activeCount>2 ? "More active setups: see per-ticket chart markings / Trade tab" : "Active prices and stops come from broker positions";
+   CreateOrUpdateCell(PREFIX+"SNT_C3_TP4",sx+14,c3Y+90,detail,clrSilver,7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,InpFontName);
+   CreateOrUpdateCell(PREFIX+"SNT_C3_INF",sx+14,c3Y+104,"Existing entries remain ACTIVE through restart, recompile and stale feeds",C'130,150,180',7,ANCHOR_LEFT_UPPER,CORNER_LEFT_UPPER,"Consolas");
 
-   if((g_hasViableEntry && !g_isSignalExpired) || isTradeTaken)
-   {
-      string actStr = "";
-      color actCol  = (g_currentAdvisedAction == "BUY") ? clrLime : clrTomato;
-      if(isTradeTaken)
-      {
-         actStr = StringFormat("EXISTING POSITION [%s] | SEEK %s", g_currentAdvisedAction, g_h4Bias=="BEARISH" ? "SELL" : (g_h4Bias=="BULLISH" ? "BUY" : "CONFIRMATION"));
-      }
-      else
-      {
-         actStr = (g_currentAdvisedAction == "BUY") ? "ACTION: STRONG BUY" : "ACTION: STRONG SELL";
-      }
-      CreateOrUpdateCell(PREFIX + "SNT_C3_ACT", sx + 14, c3Y + 16, actStr, actCol, 9, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Arial Bold");
-
-      bool tp1Hit = false, tp2Hit = false, tp3Hit = false, tp4Hit = false;
-      if(isTradeTaken && !cbBlocked)
-      {
-         EvaluateTakeProfitHits(sym, g_currentAdvisedAction, g_staticEntryPrice, g_staticTP1, g_staticTP2, g_staticTP3, g_staticTP4, execDt,
-                                tp1Hit, tp2Hit, tp3Hit, tp4Hit);
-      }
-      string setupStr = "";
-      color setupCol  = clrLime;
-      if(isTradeTaken)
-      {
-         if(openLegs == 0)
-         {
-            if(tp1Hit && tp2Hit && tp3Hit && tp4Hit)
-               setupStr = "ALL TARGETS HIT (100%)";
-            else
-               setupStr = (execTimeStr != "") ? ("EXECUTED: " + execTimeStr) : "SETUP: ALL TRADES CLOSED";
-            setupCol = clrAqua;
-         }
-         else if(openLegs == 4)
-         {
-            setupStr = (execTimeStr != "") ? ("EXECUTED: " + execTimeStr) : "4 LEGS ACTIVE (MONITORING)";
-            setupCol = clrLime;
-         }
-         else if(openLegs == 3)
-         {
-            setupStr = tp1Hit ? "3 LEGS ACTIVE (TP1 HIT)" : "3 LEGS ACTIVE (IN PLAY)";
-            setupCol = clrLime;
-         }
-         else if(openLegs == 2)
-         {
-            setupStr = (tp1Hit && tp2Hit) ? "2 LEGS ACTIVE (TP1 & TP2 HIT)" : "2 LEGS ACTIVE (IN PLAY)";
-            setupCol = clrLime;
-         }
-         else if(openLegs == 1)
-         {
-            setupStr = (tp1Hit && tp2Hit && tp3Hit) ? "1 RUNNER ACTIVE (TP3 HIT)" : "1 RUNNER ACTIVE (IN PLAY)";
-            setupCol = clrLime;
-         }
-         else
-         {
-            setupStr = StringFormat("%d LEGS ACTIVE", openLegs);
-            setupCol = clrLime;
-         }
-      }
-      else
-      {
-         if(cbBlocked)
-         {
-            setupStr = "SETUP: PLANNED (CB STANDBY)";
-            setupCol = clrGold;
-         }
-         else if(g_setupState == "CANCELLED" || g_setupState == "UNVIABLE")
-         {
-            setupStr = "SETUP: PLANNED CANCELLED";
-            setupCol = clrCoral;
-         }
-         else if(g_setupState == "TRIGGERED")
-         {
-            setupStr = "SETUP: TRIGGERED (EXECUTING)";
-            setupCol = clrLime;
-         }
-         else if(g_setupState == "SCANNING")
-         {
-            setupStr = "SETUP: SCANNING FOR ENTRY";
-            setupCol = clrSilver;
-         }
-         else
-         {
-            setupStr = "SETUP: PLANNED (WAITING)";
-            setupCol = clrGold;
-         }
-      }
-      CreateOrUpdateCell(PREFIX + "SNT_C3_STP", btnAdvX - 12, c3Y + 16, setupStr, setupCol, 8, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-
-      string lvlLabel = isTradeTaken ? "ACTIVE ENTRY" : "PLANNED ENTRY";
-      double dispSL = g_staticSL;
-      string lvlStr = StringFormat("%s: %s  |  SL: %s",
-         lvlLabel,
-         DoubleToString(g_staticEntryPrice, symDigits),
-         DoubleToString(dispSL, symDigits));
-      CreateOrUpdateCell(PREFIX + "SNT_C3_LVL", sx + 14, c3Y + 31, lvlStr, clrWhite, 8, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-
-      // Prominent, unoccluded Signal Quality & R:R display in Row 2 (Right-aligned before buttons - ZERO OVERLAP)
-      int qualityScore = (g_setupQuality > 0) ? g_setupQuality : 100;
-      color qualCol = (qualityScore >= 80) ? clrLime : ((qualityScore >= 65) ? clrGold : clrAqua);
-      string qualStr = StringFormat("R:R %s  |  QUALITY: %d%%", rrRatioStr, qualityScore);
-      CreateOrUpdateCell(PREFIX + "SNT_C3_QUAL", btnAdvX - 12, c3Y + 31, qualStr, qualCol, 8, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-
-      if(isTradeTaken)
-      {
-         string tp1Label = tp1Hit ? "TP1 Hit" : "1.4R FTA";
-         string tp2Label = tp2Hit ? "TP2 Hit" : "2.8R BE LOCK";
-         string tp3Label = tp3Hit ? "TP3 Hit" : "4.8R POOL";
-         string tp4Label = tp4Hit ? "TP4 Hit" : "8.0R RUNNER";
-
-         string tpRow1 = StringFormat("TP1: %s (%s)  |  TP2: %s (%s)",
-            DoubleToString(g_staticTP1, symDigits),
-            tp1Label,
-            DoubleToString(g_staticTP2, symDigits),
-            tp2Label);
-         color tpRow1Col = (tp1Hit && tp2Hit) ? clrLime : (tp1Hit ? clrGold : clrAqua);
-         CreateOrUpdateCell(PREFIX + "SNT_C3_TPS", sx + 14, c3Y + 46, tpRow1, tpRow1Col, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-
-         string tpRow2 = StringFormat("TP3: %s (%s) |  TP4: %s (%s)",
-            DoubleToString(g_staticTP3, symDigits),
-            tp3Label,
-            DoubleToString(g_staticTP4, symDigits),
-            tp4Label);
-         color tpRow2Col = (tp3Hit && tp4Hit) ? clrLime : (tp3Hit ? C'140,255,170' : C'100,210,255');
-         CreateOrUpdateCell(PREFIX + "SNT_C3_TP4", sx + 14, c3Y + 60, tpRow2, tpRow2Col, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-      }
-      else
-      {
-         // Standard Rule: Take profit information is hidden when no trade is opened.
-         // Trade advisor actively looks for new entries and displays Planned Entry.
-         if(g_setupState == "CANCELLED" || g_setupState == "UNVIABLE")
-         {
-            CreateOrUpdateCell(PREFIX + "SNT_C3_TPS", sx + 14, c3Y + 46, "STATUS: PLANNED ENTRY CANCELLED", clrCoral, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-            CreateOrUpdateCell(PREFIX + "SNT_C3_TP4", sx + 14, c3Y + 60, "DISCIPLINE: " + (g_blockReason != "" ? g_blockReason : "PREVIOUS ENTRY UNVIABLE - STAND ASIDE"), C'170,180,200', 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-         }
-         else
-         {
-            CreateOrUpdateCell(PREFIX + "SNT_C3_TPS", sx + 14, c3Y + 46, "ADVISOR: ACTIVELY LOOKING FOR NEW ENTRIES", clrGold, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-            CreateOrUpdateCell(PREFIX + "SNT_C3_TP4", sx + 14, c3Y + 60, "STATUS: NO ACTIVE TRADE OPENED (TP TARGETS ACTIVATE ON ENTRY)", C'120,130,150', 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-         }
-      }
-
-      string dispSig = (StringLen(g_currentSignalID) > 14) ? (StringSubstr(g_currentSignalID, 0, 5) + ".." + StringSubstr(g_currentSignalID, StringLen(g_currentSignalID) - 5)) : g_currentSignalID;
-      if(dispSig == "") dispSig = "VERIFIED";
-      string stratTag = (g_activeEntryStrategy == "ORDER_BLOCK") ? "STRAT: OB (70%)" : "STRAT: RETEST (30%)";
-      string sigInfo = "";
-      if(isTradeTaken)
-      {
-         string execPart = (execTimeStr != "") ? (" | EXEC: " + execTimeStr) : "";
-         if(openLegs == 0)
-         {
-            if(tp1Hit && tp2Hit && tp3Hit && tp4Hit)
-               sigInfo = StringFormat("STATUS: ALL TARGETS HIT (TP1, TP2, TP3, TP4) | %s%s | COMPLETED", stratTag, execPart);
-            else
-               sigInfo = StringFormat("STATUS: POSITION CLOSED | %s%s", stratTag, execPart);
-         }
-         else
-         {
-            if(tp1Hit && tp2Hit && tp3Hit)
-               sigInfo = StringFormat("STATUS: %d Leg Active (TP4 Runner In Play) | TP1, TP2, TP3 Banked%s | %s", openLegs, execPart, stratTag);
-            else if(tp1Hit && tp2Hit)
-               sigInfo = StringFormat("STATUS: %d Legs Active (TP3 & TP4 In Play) | TP1 & TP2 Banked (BE Locked)%s | %s", openLegs, execPart, stratTag);
-            else if(tp1Hit)
-               sigInfo = StringFormat("STATUS: %d Legs Active (TP2, TP3, TP4 In Play) | TP1 Banked (1.4R)%s | %s", openLegs, execPart, stratTag);
-            else
-               sigInfo = StringFormat("STATUS: %d Existing Legs @ %s%s | Monitoring Targets | %s", openLegs, DoubleToString(g_staticEntryPrice, symDigits), execPart, stratTag);
-         }
-      }
-      else
-      {
-         string liqTag = (g_htfLiquidity.activeConfluenceLabel != "") ? (" | " + g_htfLiquidity.activeConfluenceLabel) : "";
-         sigInfo = "SIG: " + dispSig + " | " + stratTag + " | " + StringFormat("QUAL: %d%%", qualityScore) + liqTag + " | 4 Equal Legs (25% ea)";
-      }
-      color sigInfoCol = (tp1Hit || tp2Hit || tp3Hit) ? clrLime : C'130,150,180';
-      CreateOrUpdateCell(PREFIX + "SNT_C3_INF", sx + 14, c3Y + 74, sigInfo, sigInfoCol, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Consolas");
-   }
-   else
-   {
-      ObjectDelete(0, PREFIX + "SNT_C3_QUAL");
-
-      if(cbBlocked && !isTradeTaken)
-      {
-         CreateOrUpdateCell(PREFIX + "SNT_C3_ACT", sx + 14, c3Y + 16, "ACTION: PAUSED (CIRCUIT BREAKER)", clrTomato, 9, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Arial Bold");
-         string setupStr = (cbTotal >= InpMaxDailyPortfolioLosses) ? "PORTFOLIO PAUSED (6 LOSSES)" : "SYMBOL PAUSED (3 LOSSES)";
-         CreateOrUpdateCell(PREFIX + "SNT_C3_STP", btnAdvX - 12, c3Y + 16, setupStr, clrTomato, 8, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-         string cbMsg = (StringLen(cbReason) > 42) ? (StringSubstr(cbReason, 0, 40) + "..") : cbReason;
-         CreateOrUpdateCell(PREFIX + "SNT_C3_LVL", sx + 14, c3Y + 31, "STATUS: " + cbMsg, clrSilver, 8, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-      }
-      else
-      {
-         if(g_isSignalExpired && !isTradeTaken)
-         {
-            CreateOrUpdateCell(PREFIX + "SNT_C3_ACT", sx + 14, c3Y + 16, "ACTION: SIGNAL EXPIRED", clrTomato, 9, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Arial Bold");
-            CreateOrUpdateCell(PREFIX + "SNT_C3_STP", btnAdvX - 12, c3Y + 16, "STATUS: EXPIRED", clrTomato, 8, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-            string staleReason = (g_blockReason != "") ? g_blockReason : "SIGNAL EXPIRED (STALE SETUP)";
-            if(StringLen(staleReason) > 42) staleReason = StringSubstr(staleReason, 0, 40) + "..";
-            CreateOrUpdateCell(PREFIX + "SNT_C3_LVL", sx + 14, c3Y + 31, "STATUS: " + staleReason, clrTomato, 8, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-         }
-         else
-         {
-            CreateOrUpdateCell(PREFIX + "SNT_C3_ACT", sx + 14, c3Y + 16, "ACTION: STAND ASIDE", clrGold, 9, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Arial Bold");
-            string setupStr = "";
-            color setupCol = clrTomato;
-            if(isTradeTaken && execDt > 0)
-            {
-               if(execTimeStr != "")
-                  setupStr = "EXECUTED: " + execTimeStr;
-               else
-               {
-                  datetime torTime = ConvertBrokerTimeToToronto(execDt);
-                  string tz = IsTorontoDST(torTime) ? "EDT" : "EST";
-                  setupStr = "EXECUTED: " + TimeToString(torTime, TIME_DATE) + " " + TimeToString(torTime, TIME_MINUTES) + " " + tz;
-               }
-               setupCol = clrLime;
-            }
-            else
-            {
-               setupStr = "GATE: " + (g_isMarketOpen ? (g_setupState != "" ? g_setupState : "WATCHING") : "MARKET CLOSED");
-               setupCol = clrTomato;
-            }
-            CreateOrUpdateCell(PREFIX + "SNT_C3_STP", btnAdvX - 12, c3Y + 16, setupStr, setupCol, 8, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-
-            string standReason = (g_blockReason != "") ? g_blockReason : ((g_primaryRejectionReason != "") ? g_primaryRejectionReason : "Awaiting value pullback / retest");
-            if(StringLen(standReason) > 42) standReason = StringSubstr(standReason, 0, 40) + "..";
-            CreateOrUpdateCell(PREFIX + "SNT_C3_LVL", sx + 14, c3Y + 31, "STATUS: " + standReason, clrSilver, 8, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-         }
-      }
-
-      string plannedRef = "";
-      if(isTradeTaken && g_staticEntryPrice > 0.0)
-      {
-         bool tp1Hit_e = false, tp2Hit_e = false, tp3Hit_e = false, tp4Hit_e = false;
-         EvaluateTakeProfitHits(sym, g_currentAdvisedAction, g_staticEntryPrice, g_staticTP1, g_staticTP2, g_staticTP3, g_staticTP4, execDt,
-                                tp1Hit_e, tp2Hit_e, tp3Hit_e, tp4Hit_e);
-         if(tp1Hit_e || tp2Hit_e || tp3Hit_e)
-         {
-            string tpHitTag = "";
-            if(tp1Hit_e && tp2Hit_e && tp3Hit_e && tp4Hit_e) tpHitTag = "ALL TARGETS HIT (100%)";
-            else if(tp1Hit_e && tp2Hit_e && tp3Hit_e) tpHitTag = "TP1 Hit • TP2 Hit • TP3 Hit";
-            else if(tp1Hit_e && tp2Hit_e) tpHitTag = "TP1 Hit • TP2 Hit";
-            else if(tp1Hit_e) tpHitTag = "TP1 Hit";
-            plannedRef = StringFormat("STATUS: %s | ENTRY: %s", tpHitTag, DoubleToString(g_staticEntryPrice, symDigits));
-         }
-         else
-         {
-            plannedRef = StringFormat("ACTIVE SAFE ENTRY: %s | SAFE SL: %s", DoubleToString(g_staticEntryPrice, symDigits), DoubleToString(g_staticSL, symDigits));
-         }
-      }
-      else if(g_staticEntryPrice > 0.0)
-         plannedRef = StringFormat("PLANNED ENTRY: %s | SAFE SL: %s", DoubleToString(g_staticEntryPrice, symDigits), DoubleToString(g_staticSL, symDigits));
-      else
-         plannedRef = "Awaiting structural anchor";
-      CreateOrUpdateCell(PREFIX + "SNT_C3_TPS", sx + 14, c3Y + 46, plannedRef, C'140,185,220', 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
-
-      string guide = "";
-      if(isTradeTaken)
-         guide = (execTimeStr != "") ? ("DISCIPLINE: Active safe trade running (Exec: " + execTimeStr + "). Stand aside from secondary entries.") : "DISCIPLINE: Active safe trade running. Stand aside from secondary entries unless price bounces off safe zone.";
-      else if(cbBlocked)
-         guide = "CIRCUIT BREAKER: Capital preserved. Trading paused for remainder of today.";
-      else if(g_staticEntryPrice > 0.0)
-         guide = "DISCIPLINE: Do not chase extended price. Wait for pullback.";
-      else
-         guide = "DISCIPLINE: Stand aside until structure & gate align.";
-      CreateOrUpdateCell(PREFIX + "SNT_C3_TP4", sx + 14, c3Y + 60, guide, C'140,155,180', 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-
-      string subInfo = (g_setupState != "") ? ("STATE: " + g_setupState) : "STATE: MONITORING";
-      string stratTagWait = (g_activeEntryStrategy == "ORDER_BLOCK") ? "STRAT: OB (70%)" : "STRAT: RETEST (30%)";
-      string execInf = (isTradeTaken && execTimeStr != "") ? (" | " + execTimeStr) : "";
-      CreateOrUpdateCell(PREFIX + "SNT_C3_INF", sx + 14, c3Y + 74, subInfo + " | " + stratTagWait + execInf + " | Zero-Repaint Engine", C'110,130,160', 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   }   string alertBtnTxt = g_alertOnViableEntry ? "ALERTS: ON [O]" : "ALERTS: OFF [O]";
+   string alertBtnTxt = g_alertOnViableEntry ? "ALERTS: ON [O]" : "ALERTS: OFF [O]";
    color alertBtnBg   = g_alertOnViableEntry ? C'18,50,30' : C'40,20,20';
    color alertBtnFg   = g_alertOnViableEntry ? clrLime : clrSilver;
    CreateOrUpdateButton(PREFIX + "SNT_ALERT_BTN", btnAdvX, c3Y + 8, btnAdvW, 20, alertBtnTxt, alertBtnBg, alertBtnFg, CORNER_LEFT_UPPER, InpFontName, 7);
 
-   if(cbBlocked)
-   {
-      bool isTradeTaken = IsAdvisorTradeTaken(sym, g_currentSignalID);
-      if(isTradeTaken)
-      {
-         datetime execDt = GetAdvisorTradeExecutionTime(sym, g_currentSignalID);
-         string execTimeShort = (execDt > 0) ? TimeToString(ConvertBrokerTimeToToronto(execDt), TIME_MINUTES) : "";
-         string btnLabel = (execTimeShort != "") ? ("ACTIVE (" + execTimeShort + ")") : "POSITION ACTIVE";
-         CreateOrUpdateButton(PREFIX + "SNT_EXEC_BTN", btnAdvX, c3Y + 34, btnAdvW, 22, btnLabel, C'16,68,36', clrLime, CORNER_LEFT_UPPER, InpFontName, 7);
-      }
-      else
-      {
-         string cbBtnTxt = (cbTotal >= InpMaxDailyPortfolioLosses) ? "PAUSED (6 LOSSES)" : "PAUSED (3 LOSSES)";
-         CreateOrUpdateButton(PREFIX + "SNT_EXEC_BTN", btnAdvX, c3Y + 34, btnAdvW, 22, cbBtnTxt, C'60,20,24', clrTomato, CORNER_LEFT_UPPER, InpFontName, 7);
-      }
-   }
-   else if(g_hasViableEntry && !g_isSignalExpired)
-   {
-      bool isTradeTaken = IsAdvisorTradeTaken(sym, g_currentSignalID);
-      if(isTradeTaken)
-      {
-         datetime execDt = GetAdvisorTradeExecutionTime(sym, g_currentSignalID);
-         string execTimeShort = (execDt > 0) ? TimeToString(ConvertBrokerTimeToToronto(execDt), TIME_MINUTES) : "";
-         string btnLabel = (execTimeShort != "") ? ("ACTIVE (" + execTimeShort + ")") : "POSITION ACTIVE";
-         CreateOrUpdateButton(PREFIX + "SNT_EXEC_BTN", btnAdvX, c3Y + 34, btnAdvW, 22, btnLabel, C'16,68,36', clrLime, CORNER_LEFT_UPPER, InpFontName, 7);
-      }
-      else
-      {
-         color tradeBg = (g_currentAdvisedAction == "BUY") ? C'16,80,45' : C'80,24,30';
-         CreateOrUpdateButton(PREFIX + "SNT_EXEC_BTN", btnAdvX, c3Y + 34, btnAdvW, 22, "TRADE SETUP [Z]", tradeBg, clrWhite, CORNER_LEFT_UPPER, InpFontName, 7);
-      }
-   }
-   else if(g_isSignalExpired)
-   {
-      bool isTradeTaken = IsAdvisorTradeTaken(sym, g_currentSignalID);
-      if(isTradeTaken)
-      {
-         datetime execDt = GetAdvisorTradeExecutionTime(sym, g_currentSignalID);
-         string execTimeShort = (execDt > 0) ? TimeToString(ConvertBrokerTimeToToronto(execDt), TIME_MINUTES) : "";
-         string btnLabel = (execTimeShort != "") ? ("ACTIVE (" + execTimeShort + ")") : "POSITION ACTIVE";
-         CreateOrUpdateButton(PREFIX + "SNT_EXEC_BTN", btnAdvX, c3Y + 34, btnAdvW, 22, btnLabel, C'16,68,36', clrLime, CORNER_LEFT_UPPER, InpFontName, 7);
-      }
-      else
-      {
-         CreateOrUpdateButton(PREFIX + "SNT_EXEC_BTN", btnAdvX, c3Y + 34, btnAdvW, 22, "SIGNAL EXPIRED", C'60,20,24', clrTomato, CORNER_LEFT_UPPER, InpFontName, 7);
-      }
-   }
-   else
-   {
-      bool isTradeTaken = IsAdvisorTradeTaken(sym, g_currentSignalID);
-      if(isTradeTaken)
-      {
-         datetime execDt = GetAdvisorTradeExecutionTime(sym, g_currentSignalID);
-         string execTimeShort = (execDt > 0) ? TimeToString(ConvertBrokerTimeToToronto(execDt), TIME_MINUTES) : "";
-         string btnLabel = (execTimeShort != "") ? ("ACTIVE (" + execTimeShort + ")") : "POSITION ACTIVE";
-         CreateOrUpdateButton(PREFIX + "SNT_EXEC_BTN", btnAdvX, c3Y + 34, btnAdvW, 22, btnLabel, C'16,68,36', clrLime, CORNER_LEFT_UPPER, InpFontName, 7);
-      }
-      else
-      {
-         CreateOrUpdateButton(PREFIX + "SNT_EXEC_BTN", btnAdvX, c3Y + 34, btnAdvW, 22, "WAIT FOR SIGNAL", C'28,30,38', clrSilver, CORNER_LEFT_UPPER, InpFontName, 7);
-      }
-   }
+   string entryButton=cbBlocked ? "NEW ENTRIES PAUSED" :
+      (hasPlan && g_hasViableEntry && !g_isSignalExpired ? "TRADE NEXT SETUP [Z]" : (isTradeTaken ? "POSITION ACTIVE" : "WAIT FOR SIGNAL"));
+   CreateOrUpdateButton(PREFIX+"SNT_EXEC_BTN",btnAdvX,c3Y+34,btnAdvW,22,entryButton,C'16,68,36',clrLime,CORNER_LEFT_UPPER,InpFontName,7);
 
    int openAdvTrades = CountTotalOpenAdvisorTrades();
    int maxCeiling = MathMax(24, InpMaxOpenAdvisorTradesPortfolio);
@@ -16118,7 +15832,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.80", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.81", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {

@@ -121,5 +121,5 @@ assert 'CountOpenAdvisorTradesForSymbol(' not in execute+auto
 assert execute.count('SEGSCanScanNewSetup(sym)')==2 # Pre-check and recheck inside the account mutex.
 assert 'SEGSFreshConfirmationAfterOtherSet(sym,g_currentSignalID)' in s
 assert 'SEGSReleaseExecutedCandidate(sym);' in s
-assert 'bool isTradeTaken = HasOpenAdvisorTradesForSignal(sym,g_currentSignalID);' in s
+assert 'bool isTradeTaken=activeCount>0;' in s
 print('Live-position policy and actual execution integration checks passed; native MT5 replay still required.')
