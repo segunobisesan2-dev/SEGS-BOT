@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.77.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.78.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.77 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.78 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.77"
+#property version   "3.78"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -1051,7 +1051,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.77 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.78 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1138,7 +1138,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.77 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.78 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -16693,7 +16693,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.77", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.78", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {
@@ -17002,7 +17002,7 @@ void DrawWinRateHUD()
    CreateOrUpdateCell(PREFIX + "WR_C4_L", c4X + 6, cardY + 4, "NET CLOSED P/L", clrSilver, 7, ANCHOR_LEFT_UPPER, wc, InpFontName);
    color netCol = (netProfit >= 0.0) ? clrLime : clrTomato;
    CreateOrUpdateCell(PREFIX + "WR_C4_V", c4X + 6, cardY + 16, StringFormat("%s$%.2f", (netProfit >= 0 ? "+" : ""), netProfit), netCol, 13, ANCHOR_LEFT_UPPER, wc, "Arial Bold");
-   CreateOrUpdateCell(PREFIX + "WR_C4_S", c4X + 6, cardY + 36, StringFormat("%d Deals in %d Closed Trades", totalDeals, totalTradesClosed), clrSilver, 7, ANCHOR_LEFT_UPPER, wc, InpFontName);
+   CreateOrUpdateCell(PREFIX + "WR_C4_S", c4X + 6, cardY + 36, StringFormat("%d Completed Setups", totalTradesClosed), clrSilver, 7, ANCHOR_LEFT_UPPER, wc, InpFontName);
 
    // Toronto Time Optimal Entry Windows Banner (Section 30)
    int timeY = cardY + 58;

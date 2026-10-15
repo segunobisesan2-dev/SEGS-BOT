@@ -7,6 +7,10 @@ assert all(p.read_text()==s for p in root.rglob('*.mq5'))
 ts=(root/'src/data/mql5Code.ts').read_text()
 assert json.loads(ts.split(' = ',1)[1].split(';\nexport default',1)[0])==s
 assert s.count('allowAutoTrade=false')==1
+# HUD now consumes setup records; no removed raw-deal counter may remain in its body.
+hud=s.split('void DrawWinRateHUD()\n{',1)[1].split('void DeleteHelpHUD()',1)[0]
+assert not re.search(r'\btotalDeals\b',hud)
+assert 'StringFormat("%d Completed Setups", totalTradesClosed)' in hud
 # Regression: removed GBPUSD branch must not leave either undeclared reference.
 assert not re.search(r'\bisGBPUSD\b', s)
 assert 'bestTP2 = 1.33200' not in s and 'bestTP3 = 1.33690' not in s

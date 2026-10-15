@@ -1,3 +1,5 @@
+v3.78 fixes the undeclared `totalDeals` HUD caption left in v3.77. Use `SEGS_Trade_Manager_Pro_v3.78.mq5`. Native MetaEditor compilation remains required.
+
 # Current repair: v3.77
 
 See [REPAIR-v3.77.md](REPAIR-v3.77.md) for the history, symbol isolation and stale quote fixes, evidence limitations and native validation steps. Use `SEGS_Trade_Manager_Pro_v3.77.mq5`. Older filenames are compatibility copies. The following v3.75 notes describe earlier work and are superseded by the current report where they differ.
