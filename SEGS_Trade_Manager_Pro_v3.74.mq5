@@ -991,6 +991,901 @@ bool SEGSEnsureRuntimeReady()
    return true;
 }
 
+// === Precision entry engine: persistent, quote-driven, market orders only ===
+enum PE_MODE { DIRECT_TOUCH, BREAKOUT_RETEST };
+enum PE_INTERPRETATION { BREAKOUT_UNSELECTED, EXISTING_BLOCK_CONTINUATION, BROKEN_BLOCK_ROLE_FLIP, BOTH_SEPARATE };
+enum PE_TIMING { RETEST_TOUCH, RETEST_REJECTION_CLOSE };
+enum PE_LEVEL { NEAR_BOUNDARY, ZONE_MIDPOINT, SPECIFIED_PRICE };
+enum PE_INVALIDATION { WICK_BREAK, CLOSE_BREAK };
+enum PE_STATE { DETECTED, ELIGIBLE, WAITING_FOR_BREAKOUT, WAITING_FOR_RETEST, RETEST_TOUCHED,
+                ENTRY_SUBMITTED, TRADED, INVALIDATED, EXPIRED };
+enum PE_DIRECTION { MANUAL_BUY, MANUAL_SELL };
+input group "=== Precision Entry Engine (Opt In) ==="
+input bool InpPrecisionEntries = false; // Exclusive advisor entry owner; enable after MT5 validation
+input string InpPETestRunID = "test-1"; // Tester-only persistence scope; change for independent backtests
+input bool InpPEDirectTouch = true;
+input bool InpPEBreakoutRetest = false;
+input PE_MODE InpPEBothPriority = BREAKOUT_RETEST; // One mode per block if both enabled
+input PE_INTERPRETATION InpPEBreakoutType = BREAKOUT_UNSELECTED; // Explicit selection required
+input ENUM_TIMEFRAMES InpPEConfirmTF = PERIOD_M5;
+input PE_TIMING InpPERetestTiming = RETEST_REJECTION_CLOSE; // New design assumption
+input PE_LEVEL InpPETouchLevel = NEAR_BOUNDARY;
+input bool InpPEHonorDeepWindow = true; // Preserve Toronto 04:30-07:50 38.2% retracement rule
+input double InpPESpecifiedPrice = 0.0; // Absolute price; must be inside block
+input double InpPETouchTolerancePoints = 2.0;
+input double InpPEBreakoutBufferPoints = 2.0;
+input double InpPERejectionBufferPoints = 2.0;
+input PE_INVALIDATION InpPEInvalidation = WICK_BREAK;
+input double InpPEInvalidationBufferPoints = 2.0;
+input int InpPEExpiryMinutes = 300; // From actual detection, bounded by parent signal age
+input int InpPERetestExpiryMinutes = 60; // From confirmed breakout
+input int InpPEMaxTouches = 2; // Observed entry-level touch episodes plus historical mitigations
+input uint InpPEDeviationPoints = 20; // Broker deviation, never expanded automatically
+input int InpPEMaxQuoteAgeSeconds = 5;
+input int InpPEShockCooldownMinutes = 15;
+input double InpPEShockRangeATR = 1.0; // Current/completed M1 range versus completed H1 ATR
+input double InpPEShockGapATR = 1.0; // Adjacent Bid gap versus completed H1 ATR
+input bool InpPEManualEnabled = false;
+input string InpPEManualID = "manual-1"; // Change for a NEW setup; never reuse consumed ID
+input PE_DIRECTION InpPEManualDirection = MANUAL_BUY;
+input double InpPEManualPrice = 0.0;
+input double InpPEManualSL = 0.0;
+input double InpPEManualTP = 0.0;
+input datetime InpPEManualEligible = 0; // Broker/server time; nonzero required
+input datetime InpPEManualExpiry = 0; // Broker/server time; nonzero required
+
+// BEGIN PE PURE CORE (also compiled verbatim in the C++ regression harness)
+struct PESetup
+{
+   string id, parent, symbol;
+   int timeframe;
+   bool buy, originalBuy, flip, manual;
+   datetime origin, confirmed, detected, eligible, expires, breakout, lastBar, touchBar;
+   double low, high, level, sl, tp[4], previous;
+   double tolerance, breakoutBuffer, rejectionBuffer, invalidBuffer;
+   int touches, mode, timing, invalidation, state;
+   bool approached, inTouch, ready, unresolved;
+   ulong order; uint request;
+};
+struct PEBar { datetime time, end; double open, high, low, close; };
+bool PETerminal(int state)
+{
+   return state == TRADED || state == INVALIDATED || state == EXPIRED;
+}
+bool PEBeyond(const PESetup &s, double price)
+{
+   if(s.manual) return s.buy ? price < s.sl-s.invalidBuffer : price > s.sl+s.invalidBuffer;
+   return s.buy ? price < s.low-s.invalidBuffer : price > s.high+s.invalidBuffer;
+}
+bool PEBreaks(const PESetup &s, double close, bool reverse)
+{
+   bool buy = reverse ? !s.buy : s.buy;
+   return buy ? close > s.high+s.breakoutBuffer : close < s.low-s.breakoutBuffer;
+}
+bool PEPriorityBefore(const PESetup &a,const PESetup &b)
+{
+   return a.eligible<b.eligible || (a.eligible==b.eligible && StringCompare(a.id,b.id)<0);
+}
+bool PEOpposingOverlap(const PESetup &a,const PESetup &b)
+{
+   return !PETerminal(b.state) && a.buy!=b.buy && a.low<=b.high && b.low<=a.high;
+}
+// No history fills: returns a CURRENT-QUOTE entry event only. Invalidation always first.
+bool PEStep(PESetup &s, datetime now, double bid, const PEBar &bar)
+{
+   s.ready = false;
+   if(PETerminal(s.state) || s.state == ENTRY_SUBMITTED) return false;
+   bool newBar = bar.time > s.lastBar && bar.end <= now && bar.time >= s.eligible;
+   if(now >= s.expires) { s.state=EXPIRED; return false; }
+   if((s.invalidation == WICK_BREAK && (PEBeyond(s,bid) || (newBar && PEBeyond(s,s.buy?bar.low:bar.high)))) ||
+      (s.invalidation == CLOSE_BREAK && newBar && PEBeyond(s,bar.close)))
+   { s.state=INVALIDATED; return false; }
+   if(newBar)
+   {
+      s.lastBar=bar.time;
+      if(s.state == WAITING_FOR_BREAKOUT && PEBreaks(s,bar.close,false))
+      {
+         s.breakout=bar.end; s.state=WAITING_FOR_RETEST;
+         s.approached=false; s.inTouch=false; s.touchBar=0;
+         // A current quote after the close is allowed; no breakout-candle wick reuse.
+      }
+      else if(s.mode == BREAKOUT_RETEST && s.timing == RETEST_REJECTION_CLOSE &&
+              s.state == RETEST_TOUCHED && bar.time >= s.breakout && s.touchBar == bar.time)
+      {
+         bool rejected = s.buy ? bar.close > s.high+s.rejectionBuffer : bar.close < s.low-s.rejectionBuffer;
+         if(rejected) { s.ready=true; return true; }
+      }
+   }
+   bool watching = s.state == ELIGIBLE || s.state == WAITING_FOR_RETEST || s.state == RETEST_TOUCHED;
+   if(!watching || now < s.eligible || (s.mode == BREAKOUT_RETEST && (s.breakout == 0 || now < s.breakout))) return false;
+   bool outside = s.buy ? bid > s.level+s.tolerance : bid < s.level-s.tolerance;
+   bool touching = MathAbs(bid-s.level) <= s.tolerance;
+   if(outside) s.approached=true;
+   if(touching && !s.inTouch && s.approached)
+   {
+      s.touches++; s.touchBar=bar.end; s.state=RETEST_TOUCHED;
+      s.approached=false;
+      if(s.mode == DIRECT_TOUCH || s.timing == RETEST_TOUCH) s.ready=true;
+   }
+   s.inTouch=touching; s.previous=bid;
+   return s.ready;
+}
+// Fail closed on unrecognised broker responses, including LOCKED / ORDER_CHANGED.
+bool PEUncertainRetcode(uint code)
+{
+   switch(code)
+   {
+      case 10009: case 10010: // DONE / DONE_PARTIAL: execution evidence still required
+      case 10004: case 10006: case 10007: // requote / rejected / cancelled
+      case 10013: case 10014: case 10015: case 10016: // invalid request/volume/price/stops
+      case 10017: case 10018: case 10019: case 10020: case 10021: case 10022:
+      case 10024: case 10026: case 10027: case 10030: case 10032: case 10033:
+      case 10034: case 10035: case 10040: case 10042: case 10043: case 10044: case 10046:
+         return false; // documented definitive rejection or confirmed result
+   }
+   return true;
+}
+// END PE PURE CORE
+
+PESetup g_pe[];
+bool g_peLoaded=false;
+bool g_peStorageOK=true;
+long g_peLastTick=0;
+string PEHash(string text)
+{
+   ulong hash=1469598103934665603;
+   for(int i=0;i<StringLen(text);i++) { hash^=(ulong)StringGetCharacter(text,i); hash*=1099511628211; }
+   return StringFormat("%016I64X",hash);
+}
+string PERoot(string sym)
+{
+   return "SEGS_PE_"+PEHash(AccountInfoString(ACCOUNT_SERVER)+"/"+IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN))+"/"+IntegerToString(InpAdvisorMagicNumber)+"/"+sym+(MQLInfoInteger(MQL_TESTER)?"/TEST/"+InpPETestRunID:"/LIVE"))+"_";
+}
+string PEKey(const PESetup &s) { return PERoot(s.symbol)+s.id+"_"; }
+void PESave(const PESetup &s)
+{
+   string k=PEKey(s);
+   GlobalVariableSet(k+"S",s.state); GlobalVariableSet(k+"L",s.low); GlobalVariableSet(k+"H",s.high);
+   GlobalVariableSet(k+"E",s.eligible); GlobalVariableSet(k+"X",s.expires); GlobalVariableSet(k+"B",s.breakout);
+   GlobalVariableSet(k+"M",s.mode); GlobalVariableSet(k+"N",s.touches); GlobalVariableSet(k+"P",s.level);
+   GlobalVariableSet(k+"SL",s.sl);
+   GlobalVariableSet(k+"TF",s.timeframe); GlobalVariableSet(k+"BUY",s.buy?1.0:0.0);
+   GlobalVariableSet(k+"ORIGBUY",s.originalBuy?1.0:0.0); GlobalVariableSet(k+"FL",s.flip?1.0:0.0);
+   GlobalVariableSet(k+"MAN",s.manual?1.0:0.0); GlobalVariableSet(k+"ORIGIN",s.origin);
+   GlobalVariableSet(k+"CONF",s.confirmed);GlobalVariableSet(k+"DETECT",s.detected);
+   GlobalVariableSet(k+"TIMING",s.timing);GlobalVariableSet(k+"INV",s.invalidation);
+   GlobalVariableSet(k+"TOL",s.tolerance);GlobalVariableSet(k+"BB",s.breakoutBuffer);
+   GlobalVariableSet(k+"RB",s.rejectionBuffer);GlobalVariableSet(k+"IB",s.invalidBuffer);
+   for(int j=0;j<4;j++) GlobalVariableSet(k+"T"+IntegerToString(j),s.tp[j]);
+}
+void PEJournal(const PESetup &s)
+{
+   int journal=FileOpen(PERoot(s.symbol)+"journal.csv",FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON,';');
+   if(journal==INVALID_HANDLE) { g_peStorageOK=false; Print("[PE] journal unavailable: new submissions disabled"); return; }
+   FileSeek(journal,0,SEEK_END);
+   if(FileWrite(journal,s.id,s.state,(long)TimeCurrent(),s.unresolved?1:0,(uint)(s.order>>32),(uint)s.order,s.request)==0) g_peStorageOK=false;
+   FileFlush(journal); FileClose(journal);
+}
+void PETransition(PESetup &s, int next, string reason)
+{
+   if(s.state==next) return;
+   PrintFormat("[PE] %s %s %d -> %d: %s",s.symbol,s.id,s.state,next,reason);
+   s.state=next; PESave(s); PEJournal(s);
+}
+void PERecord(PESetup &s, int old, string reason)
+{
+   int next=s.state; s.state=old; PETransition(s,next,reason);
+}
+bool PECancelAdvisorOrders(string sym)
+{
+   bool clean=true;
+   CTrade cancel;
+   cancel.SetAsyncMode(false);
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong tk=OrderGetTicket(i);
+      if(tk==0 || OrderGetString(ORDER_SYMBOL)!=sym || OrderGetInteger(ORDER_MAGIC)!=InpAdvisorMagicNumber) continue;
+      ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(type==ORDER_TYPE_BUY || type==ORDER_TYPE_SELL) { clean=false; continue; } // In-flight deal, never delete/retry
+      if(!cancel.OrderDelete(tk) || cancel.ResultRetcode()!=TRADE_RETCODE_DONE) clean=false;
+      PrintFormat("[PE] cancel incompatible advisor pending %I64u ret=%u",tk,cancel.ResultRetcode());
+   }
+   return clean;
+}
+void PESetOwner(const PESetup &s)
+{
+   ulong id=0;
+   for(int j=0;j<StringLen(s.id);j++)
+   { ushort c=StringGetCharacter(s.id,j); id=(id<<4)+(ulong)(c>='A'?c-'A'+10:c-'0'); }
+   string root=PERoot(s.symbol);
+   GlobalVariableSet(root+"OH",(double)(uint)(id>>32));GlobalVariableSet(root+"OL",(double)(uint)id);
+}
+bool PEOwns(const PESetup &s)
+{
+   string root=PERoot(s.symbol);
+   string owner=StringFormat("%08X%08X",(uint)GlobalVariableGet(root+"OH"),(uint)GlobalVariableGet(root+"OL"));
+   return owner==s.id;
+}
+void PEReconcile()
+{
+   bool needed=false;
+   for(int n=0;n<ArraySize(g_pe);n++) if(g_pe[n].state==ENTRY_SUBMITTED || g_pe[n].unresolved ||
+      ((g_pe[n].state==TRADED || g_pe[n].state==INVALIDATED) && PEOwns(g_pe[n]) && GlobalVariableGet(PERoot(_Symbol)+"BUSY")>0)) { needed=true;break; }
+   if(!needed) return; // Another chart may own an unresolved symbol reservation.
+   if(!HistorySelect(0,TimeCurrent())) return;
+   bool reserved=false,ownerResolved=false;
+   for(int n=0;n<ArraySize(g_pe);n++)
+   {
+      if(g_pe[n].state!=ENTRY_SUBMITTED && !g_pe[n].unresolved &&
+         !((g_pe[n].state==TRADED || g_pe[n].state==INVALIDATED) && PEOwns(g_pe[n]) && GlobalVariableGet(PERoot(_Symbol)+"BUSY")>0)) continue;
+      bool filled=false,terminalOrder=false,rejected=false;
+      if(g_pe[n].order>0 && HistoryOrderSelect(g_pe[n].order))
+      {
+         ENUM_ORDER_STATE os=(ENUM_ORDER_STATE)HistoryOrderGetInteger(g_pe[n].order,ORDER_STATE);
+         terminalOrder=os==ORDER_STATE_FILLED || os==ORDER_STATE_CANCELED || os==ORDER_STATE_REJECTED || os==ORDER_STATE_EXPIRED;
+         rejected=os==ORDER_STATE_REJECTED || os==ORDER_STATE_CANCELED || os==ORDER_STATE_EXPIRED;
+      }
+      if(terminalOrder) g_pe[n].unresolved=false;
+      for(int p=PositionsTotal()-1;p>=0;p--)
+         if(PositionGetTicket(p)>0 && PositionGetString(POSITION_SYMBOL)==g_pe[n].symbol &&
+            PositionGetInteger(POSITION_MAGIC)==InpAdvisorMagicNumber && StringFind(PositionGetString(POSITION_COMMENT),g_pe[n].id)>=0) filled=true;
+      if(!HistorySelect(0,TimeCurrent())) return;
+      for(int d=HistoryDealsTotal()-1;d>=0 && !filled;d--)
+      {
+         ulong tk=HistoryDealGetTicket(d);
+         if(HistoryDealGetString(tk,DEAL_SYMBOL)!=g_pe[n].symbol || HistoryDealGetInteger(tk,DEAL_MAGIC)!=InpAdvisorMagicNumber) continue;
+         ENUM_DEAL_ENTRY e=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(tk,DEAL_ENTRY);
+         if((e==DEAL_ENTRY_IN || e==DEAL_ENTRY_INOUT) && StringFind(HistoryDealGetString(tk,DEAL_COMMENT),g_pe[n].id)>=0) filled=true;
+      }
+      if(filled) PETransition(g_pe[n],TRADED,"broker entry confirmed; partial fills consume setup");
+      else if(rejected) PETransition(g_pe[n],INVALIDATED,"broker history confirms rejection/cancellation without entry");
+      if(terminalOrder) PEJournal(g_pe[n]);
+      if(g_pe[n].unresolved || g_pe[n].state==ENTRY_SUBMITTED) reserved=true;
+      else if(PEOwns(g_pe[n])) ownerResolved=true;
+   }
+   // Only precision reconciliation may release a precision reservation; legacy uncertainty stays explicit.
+   if(ownerResolved && !reserved && GlobalVariableGet(PERoot(_Symbol)+"LEGACY")==0)
+      GlobalVariableSet(PERoot(_Symbol)+"BUSY",0.0);
+   GlobalVariablesFlush();
+}
+double PEATR(string sym)
+{
+   double values[];
+   int handle=(sym==_Symbol)?g_hAtr_H1:iATR(sym,PERIOD_H1,14);
+   bool ok=handle!=INVALID_HANDLE && CopyBuffer(handle,0,1,1,values)==1;
+   if(sym!=_Symbol && handle!=INVALID_HANDLE) IndicatorRelease(handle);
+   return ok && MathIsValidNumber(values[0]) && values[0]>0.0 ? values[0] : 0.0;
+}
+// Shared final gate for every entry submission. Exits never call this gate.
+bool PEFinalGate(string sym, bool buy, double entry, double sl, double tp, string &why)
+{
+   why="";
+   MqlTick q;
+   if(!SymbolInfoTick(sym,q) || q.bid<=0 || q.ask<q.bid || q.ask<=0 ||
+      TimeCurrent()-q.time>InpPEMaxQuoteAgeSeconds) { why="missing/stale executable quote"; return false; }
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) || !MQLInfoInteger(MQL_TRADE_ALLOWED) ||
+      !AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) || !AccountInfoInteger(ACCOUNT_TRADE_EXPERT)) { why="trading permissions"; return false; }
+   if(!IsBrokerSymbolTradeable(sym,why)) return false;
+   ENUM_SYMBOL_TRADE_MODE tm=(ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(sym,SYMBOL_TRADE_MODE);
+   if(tm==SYMBOL_TRADE_MODE_DISABLED || tm==SYMBOL_TRADE_MODE_CLOSEONLY ||
+      (buy && tm==SYMBOL_TRADE_MODE_SHORTONLY) || (!buy && tm==SYMBOL_TRADE_MODE_LONGONLY)) { why="broker direction restriction"; return false; }
+   bool blocked=false; int consecutive=0,total=0;
+   CheckCircuitBreaker(sym,blocked,why,consecutive,total);
+   if(blocked) return false;
+   string cashName,strategy;
+   ENUM_CASH_SESSION cash=GetUnderlyingCashSession(sym,cashName,strategy);
+   string asset=DetectAssetType(sym);
+   string upper=sym;StringToUpper(upper);
+   bool index=IsSymbolMatch(sym,InpDJ30_Patterns)||IsSymbolMatch(sym,InpNAS_Patterns)||asset=="AMD" ||
+      StringFind(upper,"US100")>=0 || StringFind(upper,"USTEC")>=0 || StringFind(upper,"SPX")>=0 ||
+      StringFind(upper,"US500")>=0 || StringFind(upper,"GER")>=0 || StringFind(upper,"DE40")>=0 ||
+      StringFind(upper,"AAPL")>=0 || StringFind(upper,"TSLA")>=0 || StringFind(upper,"NVDA")>=0 ||
+      StringFind(upper,"MSFT")>=0 || StringFind(upper,"AMZN")>=0 || StringFind(upper,"NDAQ")>=0;
+   if(cash==CASH_SESSION_CLOSED || (index && (cash==CASH_SESSION_AFTERHOURS || cash==CASH_SESSION_OVERNIGHT)))
+   { why="cash/session restriction"; return false; }
+   if(InpEnableSessionShield)
+   {
+      MqlDateTime local; TimeToStruct(GetTorontoTimeNow(),local);
+      if(local.hour==8) { why="08:00-09:00 Toronto session shield"; return false; }
+   }
+   double volAtr=0,volRange=0,volScore=0;
+   if(CalculateNormalizedVolatility(sym,volAtr,volRange,volScore)=="LOW")
+   { why="existing low-volatility compression gate"; return false; }
+   if(InpMaxSetsPerSymbol<1) { why="per-symbol setup limit disabled entries"; return false; }
+   double atr=PEATR(sym);
+   if(atr<=0) { why="completed H1 ATR unavailable"; return false; }
+   string root=PERoot(sym);
+   double last=GlobalVariableGet(root+"BID");
+   double range=iHigh(sym,PERIOD_M1,0)-iLow(sym,PERIOD_M1,0);
+   double closedRange=iHigh(sym,PERIOD_M1,1)-iLow(sym,PERIOD_M1,1);
+   bool shock=(MathMax(range,closedRange)>MathMin(InpMaxSpikeAtrMultiplier,InpPEShockRangeATR)*atr ||
+               (last>0 && MathAbs(q.bid-last)>InpPEShockGapATR*atr));
+   GlobalVariableSet(root+"BID",q.bid);
+   if(shock)
+   {
+      GlobalVariableSet(root+"SHOCK",(double)(TimeCurrent()+InpPEShockCooldownMinutes*60));
+      GlobalVariablesFlush();
+   }
+   if(GlobalVariableGet(root+"SHOCK")>TimeCurrent()) { why="price shock: stabilization cooldown"; return false; }
+   if(!MathIsValidNumber(entry)||!MathIsValidNumber(sl)||!MathIsValidNumber(tp)||entry<=0||sl<=0||tp<=0 ||
+      (buy ? sl>=entry || tp<=entry : sl<=entry || tp>=entry)) { why="invalid protective levels"; return false; }
+   double tick=SymbolInfoDouble(sym,SYMBOL_TRADE_TICK_SIZE), point=SymbolInfoDouble(sym,SYMBOL_POINT);
+   double minimum=MathMax(SymbolInfoInteger(sym,SYMBOL_TRADE_STOPS_LEVEL),SymbolInfoInteger(sym,SYMBOL_TRADE_FREEZE_LEVEL))*point;
+   double reference=buy?q.bid:q.ask;
+   if(tick<=0 || point<=0 || MathAbs(sl/tick-MathRound(sl/tick))>0.00001 || MathAbs(tp/tick-MathRound(tp/tick))>0.00001 ||
+      (buy ? reference-sl<minimum || tp-reference<minimum : sl-reference<minimum || reference-tp<minimum))
+   { why="tick size or broker stop/freeze distance"; return false; }
+   double risk=MathAbs(entry-sl), spread=q.ask-q.bid, ratio=1.0;
+   CheckSpreadQuality(sym,ratio);
+   if(spread/risk>0.25 || ratio>4.5 || (InpEnableSpreadGuard && ratio>MathMin(2.0,InpSpreadMultiplierThreshold)))
+   { why="spread/cost guard"; return false; }
+   if(MathAbs(tp-entry)/risk<InpMinRewardRiskRatio) { why="live reward/risk below configured minimum"; return false; }
+   int ceiling=MathMin(InpAdvisorMaxTotalOpenTrades,InpMaxOpenAdvisorTradesPortfolio);
+   if(ceiling<1 || CountTotalOpenAdvisorTrades()>=ceiling || CountOpenSEGSPositions()>=InpAdvisorMaxTotalOpenTrades)
+   { why="portfolio position ceiling"; return false; }
+   return true;
+}
+
+bool PEConfigValid()
+{
+   if(PeriodSeconds(InpPEConfirmTF)<=0 || InpPEExpiryMinutes<1 || InpPERetestExpiryMinutes<1 ||
+      InpPEMaxTouches<1 || InpPEMaxQuoteAgeSeconds<1 || InpPEShockCooldownMinutes<1 ||
+      InpMaxSpikeAtrMultiplier<=0 || InpPEShockRangeATR<=0 || InpPEShockGapATR<=0 || InpPETouchTolerancePoints<0 ||
+      InpPEBreakoutBufferPoints<0 || InpPERejectionBufferPoints<0 || InpPEInvalidationBufferPoints<0) return false;
+   return true;
+}
+void PEAdd(PESetup &s)
+{
+   if(ArraySize(g_pe)>=256) return; // Bounded catalog; consumed tombstones remain durable
+   for(int n=0;n<ArraySize(g_pe);n++) if(g_pe[n].id==s.id) return;
+   string key=PEKey(s);
+   if(GlobalVariableCheck(key+"S"))
+   {
+      s.state=(int)GlobalVariableGet(key+"S");
+      s.low=GlobalVariableGet(key+"L"); s.high=GlobalVariableGet(key+"H");
+      s.level=GlobalVariableGet(key+"P"); s.sl=GlobalVariableGet(key+"SL");
+      s.eligible=(datetime)GlobalVariableGet(key+"E"); s.expires=(datetime)GlobalVariableGet(key+"X");
+      s.breakout=(datetime)GlobalVariableGet(key+"B"); s.mode=(int)GlobalVariableGet(key+"M");
+      s.touches=(int)GlobalVariableGet(key+"N");
+      for(int j=0;j<4;j++) s.tp[j]=GlobalVariableGet(key+"T"+IntegerToString(j));
+      if(!PETerminal(s.state) && s.state!=ENTRY_SUBMITTED)
+         PETransition(s,EXPIRED,"restart: interrupted tick sequence; require a new setup ID");
+   }
+   else
+   {
+      s.state=DETECTED; PESave(s);
+      PETransition(s,ELIGIBLE,"frozen eligible zone; no retroactive entries");
+      if(s.mode==BREAKOUT_RETEST) PETransition(s,WAITING_FOR_BREAKOUT,"selected mode requires a later completed breakout candle");
+   }
+   int n=ArraySize(g_pe); ArrayResize(g_pe,n+1); g_pe[n]=s;
+   // Durable catalog: reconstruct even zones no longer returned by the scanner.
+   string root=PERoot(_Symbol); int count=(int)GlobalVariableGet(root+"COUNT");
+   bool known=false;
+   for(int j=0;j<count;j++)
+   {
+      string slot=root+"I"+IntegerToString(j);
+      uint hi=(uint)GlobalVariableGet(slot+"H"),lo=(uint)GlobalVariableGet(slot+"L");
+      if(StringFormat("%08X%08X",hi,lo)==s.id) { known=true; break; }
+   }
+   if(!known && count<2048)
+   {
+      // Hash split into two exactly representable uint values.
+      ulong id=0;
+      for(int j=0;j<StringLen(s.id);j++)
+      { ushort c=StringGetCharacter(s.id,j); id=(id<<4)+(ulong)(c>='A'?c-'A'+10:c-'0'); }
+      string slot=root+"I"+IntegerToString(count);
+      GlobalVariableSet(slot+"H",(double)(uint)(id>>32)); GlobalVariableSet(slot+"L",(double)(uint)id);
+      GlobalVariableSet(root+"COUNT",count+1);
+   }
+   GlobalVariablesFlush();
+}
+void PEInit()
+{
+   if(g_peLoaded) return;
+   string root=PERoot(_Symbol);
+   if(FileIsExist(root+"journal.csv",FILE_COMMON))
+   {
+      int journal=FileOpen(root+"journal.csv",FILE_READ|FILE_CSV|FILE_ANSI|FILE_COMMON,';');
+      if(journal==INVALID_HANDLE) { g_peStorageOK=false; return; }
+      while(!FileIsEnding(journal))
+      {
+         string id=FileReadString(journal);
+         if(id=="" && FileIsEnding(journal)) break;
+         int state=(int)FileReadNumber(journal); FileReadNumber(journal); // timestamp
+         bool unresolved=FileReadNumber(journal)>0.5;
+         uint orderHi=(uint)FileReadNumber(journal),orderLo=(uint)FileReadNumber(journal);
+         uint requestID=(uint)FileReadNumber(journal);
+         if(StringLen(id)!=16 || state<DETECTED || state>EXPIRED) { g_peStorageOK=false; break; }
+         string key=root+id+"_S";
+         GlobalVariableSet(key,state);
+         // Reconstruct an unresolved reservation even after all terminal globals have expired.
+         int idx=-1;
+         for(int n=0;n<ArraySize(g_pe);n++) if(g_pe[n].id==id) { idx=n;break; }
+         if(state==ENTRY_SUBMITTED || unresolved || idx>=0)
+         {
+            if(idx<0) { idx=ArraySize(g_pe);ArrayResize(g_pe,idx+1);ZeroMemory(g_pe[idx]);g_pe[idx].id=id;g_pe[idx].symbol=_Symbol; }
+            g_pe[idx].state=state;g_pe[idx].unresolved=unresolved;
+            g_pe[idx].order=((ulong)orderHi<<32)|(ulong)orderLo;g_pe[idx].request=requestID;
+         }
+      }
+      FileClose(journal);
+      for(int n=0;n<ArraySize(g_pe);n++) if(g_pe[n].state==ENTRY_SUBMITTED || g_pe[n].unresolved)
+      { PESetOwner(g_pe[n]); GlobalVariableSet(root+"BUSY",(double)TimeCurrent()); }
+   }
+   int count=MathMin(2048,(int)GlobalVariableGet(root+"COUNT"));
+   for(int j=0;j<count;j++)
+   {
+      PESetup s; ZeroMemory(s); s.symbol=_Symbol;
+      string slot=root+"I"+IntegerToString(j);
+      s.id=StringFormat("%08X%08X",(uint)GlobalVariableGet(slot+"H"),(uint)GlobalVariableGet(slot+"L"));
+      string key=PEKey(s);
+      s.state=(int)GlobalVariableGet(key+"S");
+      s.timeframe=(int)GlobalVariableGet(key+"TF");s.buy=GlobalVariableGet(key+"BUY")>0.5;
+      s.originalBuy=GlobalVariableGet(key+"ORIGBUY")>0.5;s.flip=GlobalVariableGet(key+"FL")>0.5;
+      s.manual=GlobalVariableGet(key+"MAN")>0.5;s.origin=(datetime)GlobalVariableGet(key+"ORIGIN");
+      s.confirmed=(datetime)GlobalVariableGet(key+"CONF");s.detected=(datetime)GlobalVariableGet(key+"DETECT");
+      s.low=GlobalVariableGet(key+"L");s.high=GlobalVariableGet(key+"H");s.level=GlobalVariableGet(key+"P");
+      s.sl=GlobalVariableGet(key+"SL");s.eligible=(datetime)GlobalVariableGet(key+"E");
+      s.expires=(datetime)GlobalVariableGet(key+"X");s.breakout=(datetime)GlobalVariableGet(key+"B");
+      s.mode=(int)GlobalVariableGet(key+"M");s.touches=(int)GlobalVariableGet(key+"N");
+      s.timing=(int)GlobalVariableGet(key+"TIMING");s.invalidation=(int)GlobalVariableGet(key+"INV");
+      s.tolerance=GlobalVariableGet(key+"TOL");s.breakoutBuffer=GlobalVariableGet(key+"BB");
+      s.rejectionBuffer=GlobalVariableGet(key+"RB");s.invalidBuffer=GlobalVariableGet(key+"IB");
+      for(int t=0;t<4;t++) s.tp[t]=GlobalVariableGet(key+"T"+IntegerToString(t));
+      if(s.state==ENTRY_SUBMITTED)
+      {
+         int n=-1;
+         for(int k=0;k<ArraySize(g_pe);k++) if(g_pe[k].id==s.id) { n=k;break; }
+         if(n<0) { n=ArraySize(g_pe);ArrayResize(g_pe,n+1); }
+         s.unresolved=g_pe[n].unresolved;s.order=g_pe[n].order;s.request=g_pe[n].request;
+         g_pe[n]=s;
+      }
+      else if(!PETerminal(s.state)) PETransition(s,EXPIRED,"restart: no replay of unobserved ticks");
+   }
+   PEReconcile();
+   g_peLoaded=true;
+}
+// Verify the existing objective displacement/BOS branch. Exclude sweep-only historical reclassification.
+bool PEObjectiveBlock(const M30OrderBlock &ob, ENUM_TIMEFRAMES tf)
+{
+   int shift=iBarShift(_Symbol,tf,ob.originTime,true);
+   int look=MathMax(1,MathMin(500,InpOBSwingLookback));
+   int period=MathMax(1,MathMin(500,InpOBATRPeriod));
+   MqlRates r[]; ArraySetAsSeries(r,true);
+   if(shift<3 || CopyRates(_Symbol,tf,0,shift+look+period+2,r)<shift+look+period+2) return false;
+   double atr=OBATRAt(r,shift,period);
+   if(atr<=0) return false;
+   double priorHigh=r[shift+1].high,priorLow=r[shift+1].low;
+   for(int p=shift+1;p<=shift+look;p++) { priorHigh=MathMax(priorHigh,r[p].high); priorLow=MathMin(priorLow,r[p].low); }
+   bool disp=ob.bullish ? MathMax(r[shift-1].high,r[shift-2].high)-ob.high>=InpOBMinDisplacementATR*atr :
+                          ob.low-MathMin(r[shift-1].low,r[shift-2].low)>=InpOBMinDisplacementATR*atr;
+   bool bos=ob.bullish ? MathMax(r[shift-1].close,r[shift-2].close)>priorHigh : MathMin(r[shift-1].close,r[shift-2].close)<priorLow;
+   return disp && (!InpOBRequireBOS || bos);
+}
+bool PELowerConfirmed(const PESetup &s)
+{
+   if(!InpOBRequireLowerTFConfirm || s.manual) return true;
+   for(int f=0;f<2;f++)
+   {
+      ENUM_TIMEFRAMES tf=f==0?PERIOD_M5:PERIOD_M15;
+      for(int i=1;i<=3;i++)
+      {
+         datetime t=iTime(s.symbol,tf,i);
+         if(t<s.confirmed || t==0) continue;
+         double lo=iLow(s.symbol,tf,i),hi=iHigh(s.symbol,tf,i),cl=iClose(s.symbol,tf,i);
+         if(lo<=s.high && hi>=s.low && (s.buy?cl>s.high:cl<s.low)) return true;
+      }
+   }
+   return false;
+}
+void PEParameters(PESetup &s)
+{
+   double point=SymbolInfoDouble(_Symbol,SYMBOL_POINT);
+   s.tolerance=InpPETouchTolerancePoints*point;
+   s.breakoutBuffer=InpPEBreakoutBufferPoints*point;
+   s.rejectionBuffer=InpPERejectionBufferPoints*point;
+   s.invalidBuffer=InpPEInvalidationBufferPoints*point;
+   s.timing=InpPERetestTiming; s.invalidation=InpPEInvalidation;
+}
+void PEDiscover()
+{
+   if(!InpPrecisionEntries || !PEConfigValid()) return;
+   PEInit();
+   for(int n=ArraySize(g_pe)-1;n>=0;n--)
+      if(PETerminal(g_pe[n].state) && !g_pe[n].unresolved &&
+         !(g_pe[n].state==INVALIDATED && g_pe[n].mode==BREAKOUT_RETEST && !g_pe[n].flip &&
+           InpPEBreakoutType!=EXISTING_BLOCK_CONTINUATION && TimeCurrent()<g_pe[n].expires))
+      {
+         for(int k=n;k<ArraySize(g_pe)-1;k++) g_pe[k]=g_pe[k+1];
+         ArrayResize(g_pe,ArraySize(g_pe)-1);
+      }
+   for(int f=0;f<2;f++)
+   {
+      int count=f==0?ArraySize(g_orderBlocks):ArraySize(g_h1OrderBlocks);
+      ENUM_TIMEFRAMES tf=f==0?InpOBTimeframe:PERIOD_H1;
+      for(int i=0;i<count;i++)
+      {
+         M30OrderBlock ob;
+         if(f==0) ob=g_orderBlocks[i]; else ob=g_h1OrderBlocks[i];
+         if(ob.invalidated || ob.high<=ob.low || ob.low<=0 || ob.touchCount>InpOBMaxPreferredTouches ||
+            ob.qualityScore<InpOBMinimumSignalScore) continue;
+         datetime confirmed=ob.confirmTime+PeriodSeconds(tf);
+         if(confirmed>TimeCurrent() || confirmed<GlobalVariableGet(PERoot(_Symbol)+"SHOCK") || TimeCurrent()>=confirmed+InpSignalExpiryBars*PeriodSeconds(PERIOD_H1)) continue;
+         PESetup s; ZeroMemory(s); s.symbol=_Symbol; s.timeframe=tf;
+         s.id=PEHash(_Symbol+"/"+IntegerToString(tf)+"/"+IntegerToString(ob.originTime)+(ob.bullish?"/B":"/S"));
+         bool exists=false; for(int j=0;j<ArraySize(g_pe);j++) if(g_pe[j].id==s.id) { exists=true; break; }
+         if(exists) continue;
+         if(GlobalVariableCheck(PEKey(s)+"S")) { GlobalVariableGet(PEKey(s)+"S"); continue; }
+         if(!PEObjectiveBlock(ob,tf)) continue;
+         s.buy=ob.bullish; s.originalBuy=ob.bullish; s.low=ob.low; s.high=ob.high;
+         s.origin=ob.originTime; s.confirmed=confirmed; s.detected=TimeCurrent(); s.eligible=s.detected;
+         s.expires=MathMin(s.detected+InpPEExpiryMinutes*60,confirmed+InpSignalExpiryBars*3600);
+         s.touches=ob.touchCount;
+         PEParameters(s);
+         if(!InpPEDirectTouch && !InpPEBreakoutRetest) continue;
+         s.mode=InpPEDirectTouch && InpPEBreakoutRetest ? InpPEBothPriority : (InpPEDirectTouch?DIRECT_TOUCH:BREAKOUT_RETEST);
+         if(s.mode==BREAKOUT_RETEST && InpPEBreakoutType==BREAKOUT_UNSELECTED) continue;
+         s.level=InpPETouchLevel==NEAR_BOUNDARY ? (s.buy?s.high:s.low) :
+                 (InpPETouchLevel==ZONE_MIDPOINT?(s.low+s.high)/2.0:InpPESpecifiedPrice);
+         // Preserve the existing deeper-retracement mandate for continuation entries in its Toronto window.
+         if(InpPEHonorDeepWindow && IsTorontoDeepRetracementWindow() && InpPETouchLevel==NEAR_BOUNDARY)
+            s.level=s.buy?s.low+0.382*(s.high-s.low):s.high-0.382*(s.high-s.low);
+         if(s.level<s.low || s.level>s.high) continue;
+         double atr=PEATR(_Symbol); if(atr<=0) continue;
+         s.sl=GetSafestStructuralStopLoss(_Symbol,s.buy?"BUY":"SELL",s.level,s.low,s.high,atr);
+         if(s.sl<=0 || (s.buy?s.sl>=s.low:s.sl<=s.high)) continue;
+         double r2=0,rw=0;
+         BuildStructuralTargets(_Symbol,s.buy?"BUY":"SELL",s.level,s.sl,atr,s.tp[0],s.tp[1],s.tp[2],s.tp[3],r2,rw);
+         PEAdd(s);
+      }
+   }
+   if(InpPEManualEnabled && InpPEManualEligible>0 && InpPEManualExpiry>InpPEManualEligible &&
+      TimeCurrent()>=InpPEManualEligible && TimeCurrent()<InpPEManualExpiry && InpPEManualPrice>0)
+   {
+      PESetup s; ZeroMemory(s); s.symbol=_Symbol; s.id=PEHash(_Symbol+"/MANUAL/"+InpPEManualID);
+      if(GlobalVariableCheck(PEKey(s)+"S")) return;
+      s.manual=true; s.buy=InpPEManualDirection==MANUAL_BUY; s.originalBuy=s.buy;
+      s.origin=InpPEManualEligible; s.confirmed=s.origin; s.detected=TimeCurrent(); s.eligible=s.detected;
+      s.expires=InpPEManualExpiry; s.low=InpPEManualPrice; s.high=s.low; s.level=s.low; s.sl=InpPEManualSL;
+      for(int j=0;j<4;j++) s.tp[j]=InpPEManualTP;
+      s.mode=DIRECT_TOUCH; PEParameters(s);
+      if(s.sl>0 && s.tp[0]>0 && (s.buy?s.sl<s.level && s.tp[0]>s.level:s.sl>s.level && s.tp[0]<s.level)) PEAdd(s);
+   }
+}
+double PERiskBudget()
+{
+   double pct=2.0;
+   if(InpSmartRiskProfile==RISK_PROFILE_CONSERVATIVE) pct=1.0;
+   else if(InpSmartRiskProfile==RISK_PROFILE_AGGRESSIVE) pct=3.0;
+   else if(InpSmartRiskProfile==RISK_PROFILE_CUSTOM) pct=InpCustomRiskPercent;
+   return MathMax(0.0,AccountInfoDouble(ACCOUNT_BALANCE)*pct/100.0);
+}
+bool PERequestCheck(MqlTradeRequest &req, double budgetRemaining, string &why)
+{
+   bool buy=req.type==ORDER_TYPE_BUY;
+   if(!PEFinalGate(req.symbol,buy,req.price,req.sl,req.tp,why)) return false;
+   double step=SymbolInfoDouble(req.symbol,SYMBOL_VOLUME_STEP);
+   double minimum=SymbolInfoDouble(req.symbol,SYMBOL_VOLUME_MIN),maximum=SymbolInfoDouble(req.symbol,SYMBOL_VOLUME_MAX);
+   double limit=SymbolInfoDouble(req.symbol,SYMBOL_VOLUME_LIMIT),used=0.0;
+   if(step<=0 || req.volume<minimum || req.volume>maximum ||
+      MathAbs(req.volume/step-MathRound(req.volume/step))>0.00001) { why="broker volume min/max/step"; return false; }
+   for(int p=PositionsTotal()-1;p>=0;p--)
+      if(PositionGetTicket(p)>0 && PositionGetString(POSITION_SYMBOL)==req.symbol &&
+         ((PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)==buy)) used+=PositionGetDouble(POSITION_VOLUME);
+   for(int o=OrdersTotal()-1;o>=0;o--)
+   {
+      if(OrderGetTicket(o)==0 || OrderGetString(ORDER_SYMBOL)!=req.symbol) continue;
+      ENUM_ORDER_TYPE t=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      bool orderBuy=t==ORDER_TYPE_BUY || t==ORDER_TYPE_BUY_LIMIT || t==ORDER_TYPE_BUY_STOP || t==ORDER_TYPE_BUY_STOP_LIMIT;
+      if(orderBuy==buy) used+=OrderGetDouble(ORDER_VOLUME_CURRENT);
+   }
+   if(limit>0 && used+req.volume>limit+step/10) { why="symbol directional volume limit"; return false; }
+   double loss=0.0,margin=0.0;
+   if(!OrderCalcProfit(req.type,req.symbol,req.volume,req.price,req.sl,loss) || loss>=0 ||
+      -loss>budgetRemaining+0.000001) { why="aggregate cash risk budget exceeded/unavailable"; return false; }
+   if(!OrderCalcMargin(req.type,req.symbol,req.volume,req.price,margin) ||
+      margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE)/1.05) { why="margin calculation/headroom"; return false; }
+   MqlTradeCheckResult check; ZeroMemory(check);
+   if(!OrderCheck(req,check) || (check.retcode!=0 && check.retcode!=TRADE_RETCODE_DONE))
+   { why="broker OrderCheck: "+check.comment; return false; }
+   return true;
+}
+ENUM_ORDER_TYPE_FILLING PEFill(string sym)
+{
+   long flags=SymbolInfoInteger(sym,SYMBOL_FILLING_MODE);
+   if((flags & SYMBOL_FILLING_FOK)!=0) return ORDER_FILLING_FOK;
+   if((flags & SYMBOL_FILLING_IOC)!=0) return ORDER_FILLING_IOC;
+   return ORDER_FILLING_RETURN; // OrderCheck rejects if broker disallows it; no blind retry
+}
+void PESubmit(PESetup &s)
+{
+   if(!g_peStorageOK || s.state==ENTRY_SUBMITTED || PETerminal(s.state) || !s.ready || !g_myAdvisorEnabled) return;
+   string detail,source;
+   if(GetAutoExecutionState(s.symbol,detail,source)!=AUTO_EXEC_ENABLED) return;
+   if(!TryAcquireAccountLock("ADVISOR_EXEC",12)) return;
+   string why="",root=PERoot(s.symbol);
+   bool occupied=false;
+   for(int p=PositionsTotal()-1;p>=0;p--) if(PositionGetTicket(p)>0 && PositionGetString(POSITION_SYMBOL)==s.symbol) occupied=true;
+   if(occupied || GlobalVariableGet(root+"BUSY")>0 || !PECancelAdvisorOrders(s.symbol))
+   { ReleaseAccountLock("ADVISOR_EXEC"); return; }
+   MqlTick q;
+   if(!SymbolInfoTick(s.symbol,q)) { ReleaseAccountLock("ADVISOR_EXEC"); return; }
+   bool touchRequired=s.mode==DIRECT_TOUCH || s.timing==RETEST_TOUCH;
+   if(TimeCurrent()>=s.expires || (s.invalidation==WICK_BREAK && PEBeyond(s,q.bid)) ||
+      (touchRequired && MathAbs(q.bid-s.level)>s.tolerance))
+   { PETransition(s,EXPIRED,"entry quote no longer satisfies frozen trigger/validity"); ReleaseAccountLock("ADVISOR_EXEC"); return; }
+   double price=s.buy?q.ask:q.bid;
+   double atr=PEATR(s.symbol);
+   // Rejection entry may be above/below the zone; never chase beyond the existing drift input.
+   if(atr<=0 || MathAbs(price-s.level)>InpMaxEntryDriftATR*atr)
+   { PETransition(s,EXPIRED,"execution quote beyond configured entry drift"); ReleaseAccountLock("ADVISOR_EXEC"); return; }
+   int ceiling=MathMin(InpAdvisorMaxTotalOpenTrades,InpMaxOpenAdvisorTradesPortfolio);
+   int legs=MathMin(4,MathMin(InpAdvisorMaxTradesPerSetup,ceiling-CountTotalOpenAdvisorTrades()));
+   if(s.manual || AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING) legs=MathMin(1,legs);
+   double budget=PERiskBudget(),loss1=0;
+   ENUM_ORDER_TYPE type=s.buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+   if(legs<1 || !OrderCalcProfit(type,s.symbol,1.0,price,s.sl,loss1) || loss1>=0 || budget<=0)
+   { ReleaseAccountLock("ADVISOR_EXEC"); return; }
+   double total=budget/(-loss1);
+   if(!g_smartLotEnabled) total=MathMin(total,GetAdvisorLotForSymbol(s.symbol));
+   if(InpSmartMaxCapLot>0) total=MathMin(total,InpSmartMaxCapLot);
+   double step=SymbolInfoDouble(s.symbol,SYMBOL_VOLUME_STEP),minimum=SymbolInfoDouble(s.symbol,SYMBOL_VOLUME_MIN);
+   double maximum=SymbolInfoDouble(s.symbol,SYMBOL_VOLUME_MAX);
+   if(step<=0 || minimum<=0 || maximum<minimum) { ReleaseAccountLock("ADVISOR_EXEC"); return; }
+   while(legs>1 && MathFloor(total/legs/step+1e-9)*step<minimum) legs--;
+   double lot=NormalizeDouble(MathFloor(MathMin(maximum,total/legs)/step+1e-9)*step,GetVolumeDigits(s.symbol));
+   MqlTradeRequest requests[4];
+   int targetLegs[4]; for(int l=0;l<4;l++) targetLegs[l]=l;
+   int available=ceiling-CountTotalOpenAdvisorTrades();
+   if(!s.manual && available==2) targetLegs[1]=2; // Preserve legacy TP1/TP3 capacity mapping
+   if(!s.manual && available==1) targetLegs[0]=1; // Preserve legacy TP2 last slot
+   double reserved=0,reservedMargin=0;
+   for(int l=0;l<legs;l++)
+   {
+      ZeroMemory(requests[l]);
+      requests[l].action=TRADE_ACTION_DEAL; requests[l].symbol=s.symbol; requests[l].magic=InpAdvisorMagicNumber;
+      requests[l].type=type; requests[l].price=price; requests[l].sl=s.sl;
+      requests[l].tp=s.tp[targetLegs[l]]; requests[l].volume=lot; requests[l].deviation=InpPEDeviationPoints;
+      requests[l].type_filling=PEFill(s.symbol);
+      requests[l].comment=StringFormat("SEGS|ADV|%s|L%d/%d",s.id,targetLegs[l]+1,legs);
+      if(!PERequestCheck(requests[l],budget-reserved,why))
+      {
+         PrintFormat("[PE] %s skipped: %s",s.id,why);
+         PETransition(s,EXPIRED,"entry event failed final risk/broker gate: "+why);
+         ReleaseAccountLock("ADVISOR_EXEC"); return;
+      }
+      reserved+=-loss1*lot;
+      double margin=0;
+      if(!OrderCalcMargin(type,s.symbol,lot,price,margin))
+      { ReleaseAccountLock("ADVISOR_EXEC"); return; }
+      reservedMargin+=margin;
+   }
+   if(reservedMargin>AccountInfoDouble(ACCOUNT_MARGIN_FREE)/1.05)
+   { PETransition(s,EXPIRED,"aggregate basket margin exceeds free margin headroom"); ReleaseAccountLock("ADVISOR_EXEC"); return; }
+   // Durable reservation BEFORE first network submission; a crash cannot produce an automatic retry.
+   s.unresolved=true;
+   PETransition(s,ENTRY_SUBMITTED,"all legs preflighted; submission reserved");
+   if(!g_peStorageOK) { ReleaseAccountLock("ADVISOR_EXEC"); return; }
+   PESetOwner(s);
+   GlobalVariableSet(root+"BUSY",(double)TimeCurrent()); GlobalVariablesFlush();
+   ENUM_POSITION_TYPE ptype=s.buy?POSITION_TYPE_BUY:POSITION_TYPE_SELL;
+   SaveAdvisorSetupTargets("ADV_"+s.id,s.symbol,ptype,price,s.sl,s.tp[0],s.tp[1],s.tp[2],s.tp[3],legs);
+   double spent=0;
+   bool anyFill=false,uncertain=false;
+   for(int l=0;l<legs;l++)
+   {
+      if(!SymbolInfoTick(s.symbol,q)) { uncertain=anyFill; break; }
+      requests[l].price=s.buy?q.ask:q.bid;
+      if(TimeCurrent()>=s.expires || (s.invalidation==WICK_BREAK && PEBeyond(s,q.bid)) ||
+         (touchRequired && MathAbs(q.bid-s.level)>s.tolerance)) break;
+      if(MathAbs(requests[l].price-price)>InpPEDeviationPoints*SymbolInfoDouble(s.symbol,SYMBOL_POINT) ||
+         !PERequestCheck(requests[l],budget-spent,why))
+      { PrintFormat("[PE] remaining legs skipped: %s",why); break; }
+      double legRisk=0;
+      if(!OrderCalcProfit(type,s.symbol,lot,requests[l].price,s.sl,legRisk)) break;
+      MqlTradeResult result; ZeroMemory(result);
+      // Clear the prior leg's order BEFORE sending: a crash must not mistake it for this request.
+      s.order=0;s.request=0;s.unresolved=true;PEJournal(s);GlobalVariablesFlush();
+      if(!g_peStorageOK) { uncertain=true;break; }
+      bool sent=OrderSend(requests[l],result);
+      s.order=result.order;s.request=result.request_id;
+      PEJournal(s); // Preserve the outstanding request even if a later leg has an uncertain outcome.
+      GlobalVariableSet(root+"REQ",result.request_id);
+      GlobalVariablesFlush();
+      // Reserve requested cash even if partial. Do not replace a rejected/partial leg.
+      spent+=MathAbs(legRisk);
+      PrintFormat("[PE] %s leg=%d sent=%s ret=%u order=%I64u deal=%I64u",s.id,l+1,sent?"true":"false",result.retcode,result.order,result.deal);
+      if(result.retcode==TRADE_RETCODE_DONE || result.retcode==TRADE_RETCODE_DONE_PARTIAL)
+      {
+         if(result.deal>0 && HistoryDealSelect(result.deal)) anyFill=true; else uncertain=true;
+         if(result.retcode==TRADE_RETCODE_DONE_PARTIAL || uncertain) break;
+      }
+      else
+      {
+         // Only a documented definitive rejection permits releasing the SYMBOL reservation.
+         // The setup ID remains consumed regardless; TIMEOUT/CONNECTION/PLACED are uncertain.
+         uncertain=PEUncertainRetcode(result.retcode);
+         break;
+      }
+   }
+   s.unresolved=uncertain;
+   if(anyFill)
+   {
+      PETransition(s,TRADED,"confirmed entry deal; partial basket retained with protective stops; no replacement legs");
+      g_currentSignalID=s.id; g_currentAdvisedAction=s.buy?"BUY":"SELL";
+      g_currentTradeTaken=true; g_staticEntryPrice=price; g_staticSL=s.sl;
+      g_staticTP1=s.tp[0];g_staticTP2=s.tp[1];g_staticTP3=s.tp[2];g_staticTP4=s.tp[3];
+      g_lastAdvisorTradeExecTime=TimeCurrent(); g_lastAdvisorTradeSignalID=s.id;
+   }
+   else if(!uncertain) PETransition(s,INVALIDATED,"definitive rejection/pre-send failure: consumed, no retry");
+   if(!uncertain)
+   { GlobalVariableSet(root+"BUSY",0.0); GlobalVariableSet(root+"REQ",0.0); }
+   GlobalVariablesFlush();
+   ReleaseAccountLock("ADVISOR_EXEC");
+}
+void PERoleFlip(int index, const PEBar &bar)
+{
+   PESetup original=g_pe[index];
+   if(original.flip || original.manual || original.state==TRADED || original.state==ENTRY_SUBMITTED || original.state==EXPIRED ||
+      original.mode!=BREAKOUT_RETEST || InpPEBreakoutType==EXISTING_BLOCK_CONTINUATION ||
+      InpPEBreakoutType==BREAKOUT_UNSELECTED || bar.time<original.eligible || bar.end>TimeCurrent() ||
+      !PEBreaks(original,bar.close,true)) return;
+   // WICK_BREAK may already have retired the original; the role flip still requires a later confirmed close.
+   string flipID=PEHash(original.id+"/FLIP/"+IntegerToString(bar.end));
+   string marker=PEKey(original)+"FLIP";
+   if(GlobalVariableCheck(marker)) return; // One separately identified role-flip per original
+   GlobalVariableSet(marker,1.0);
+   PETransition(g_pe[index],INVALIDATED,"completed opposite breakout: original retired before role flip");
+   if(!PECancelAdvisorOrders(original.symbol)) return;
+   PESetup s=original;
+   s.id=flipID; s.parent=original.id; s.buy=!original.buy; s.flip=true;
+   s.detected=TimeCurrent();s.eligible=s.detected;s.confirmed=bar.end;s.breakout=bar.end;
+   s.expires=MathMin(original.expires,TimeCurrent()+InpPERetestExpiryMinutes*60);
+   s.lastBar=bar.time; s.approached=false;s.inTouch=false;s.ready=false;s.touchBar=0;s.touches=0;
+   s.level=InpPETouchLevel==NEAR_BOUNDARY?(s.buy?s.high:s.low):
+           (InpPETouchLevel==ZONE_MIDPOINT?(s.low+s.high)/2.0:InpPESpecifiedPrice);
+   double atr=PEATR(s.symbol); if(atr<=0 || s.level<s.low || s.level>s.high) return;
+   s.sl=GetSafestStructuralStopLoss(s.symbol,s.buy?"BUY":"SELL",s.level,s.low,s.high,atr);
+   if(s.sl<=0 || (s.buy?s.sl>=s.low:s.sl<=s.high)) return;
+   double r2=0,rw=0;
+   BuildStructuralTargets(s.symbol,s.buy?"BUY":"SELL",s.level,s.sl,atr,s.tp[0],s.tp[1],s.tp[2],s.tp[3],r2,rw);
+   PEAdd(s);
+   for(int n=0;n<ArraySize(g_pe);n++) if(g_pe[n].id==s.id)
+      PETransition(g_pe[n],WAITING_FOR_RETEST,"separately confirmed role flip; wait for later observed retest");
+}
+void PEMonitor()
+{
+   if(!InpPrecisionEntries || !PEConfigValid()) return;
+   PEInit(); PEReconcile();
+   bool clean=PECancelAdvisorOrders(_Symbol);
+   MqlTick tick; if(!SymbolInfoTick(_Symbol,tick) || tick.time_msc==g_peLastTick || tick.bid<=0) return;
+   g_peLastTick=tick.time_msc;
+   PEBar bar; ZeroMemory(bar);
+   MqlRates r[]; ArraySetAsSeries(r,true);
+   if(CopyRates(_Symbol,InpPEConfirmTF,0,2,r)!=2) return;
+   bar.time=r[1].time;bar.end=r[0].time;bar.open=r[1].open;bar.high=r[1].high;bar.low=r[1].low;bar.close=r[1].close;
+   bool buyReady=false,sellReady=false; int selected=-1;
+   int count=ArraySize(g_pe);
+   for(int n=0;n<count;n++)
+   {
+      if(!PETerminal(g_pe[n].state) && g_pe[n].state!=ENTRY_SUBMITTED &&
+         g_pe[n].confirmed<GlobalVariableGet(PERoot(_Symbol)+"SHOCK"))
+         PETransition(g_pe[n],EXPIRED,"pre-shock setup retired; require confirmation after stabilization");
+      // Role-flip confirmation is independent of original wick invalidation, never of a traded original.
+      PERoleFlip(n,bar);
+      int old=g_pe[n].state,oldTouches=g_pe[n].touches;
+      if(g_pe[n].lastBar>0 && bar.time>g_pe[n].lastBar+2*PeriodSeconds(InpPEConfirmTF) &&
+         !PETerminal(old) && old!=ENTRY_SUBMITTED)
+         PETransition(g_pe[n],EXPIRED,"missed completed candles: sequence ambiguous");
+      bool ready=PEStep(g_pe[n],TimeCurrent(),tick.bid,bar);
+      if(g_pe[n].breakout>0 && g_pe[n].expires>g_pe[n].breakout+InpPERetestExpiryMinutes*60)
+         g_pe[n].expires=g_pe[n].breakout+InpPERetestExpiryMinutes*60;
+      if(TimeCurrent()>=g_pe[n].expires && !PETerminal(g_pe[n].state) && g_pe[n].state!=ENTRY_SUBMITTED)
+      { g_pe[n].state=EXPIRED;ready=false; }
+      if(g_pe[n].touches>InpPEMaxTouches && !PETerminal(g_pe[n].state) && g_pe[n].state!=ENTRY_SUBMITTED)
+      { g_pe[n].state=EXPIRED;ready=false; }
+      PERecord(g_pe[n],old,"quote/closed-candle sequence (expiry and invalidation before trigger)");
+      if(g_pe[n].touches!=oldTouches) PESave(g_pe[n]);
+      if(!ready || PETerminal(g_pe[n].state) || g_pe[n].state==ENTRY_SUBMITTED) continue;
+      // Original in flip-only interpretation can NEVER emit a continuation entry.
+      if(g_pe[n].mode==BREAKOUT_RETEST && !g_pe[n].flip && InpPEBreakoutType==BROKEN_BLOCK_ROLE_FLIP) continue;
+      if(g_pe[n].buy) buyReady=true; else sellReady=true;
+      // Deterministic total order: oldest eligibility then lexical stable ID.
+      if(selected<0 || PEPriorityBefore(g_pe[n],g_pe[selected])) selected=n;
+   }
+   if(!clean || selected<0) return;
+   if(buyReady && sellReady)
+   {
+      for(int n=0;n<ArraySize(g_pe);n++) if(g_pe[n].ready) PETransition(g_pe[n],EXPIRED,"simultaneous opposite entry events: skip both");
+      return;
+   }
+   PESetup chosen=g_pe[selected];
+   // Opposing overlapping zones are ambiguous even when only one trigger fires this tick.
+   for(int n=0;n<ArraySize(g_pe);n++)
+      if(n!=selected && PEOpposingOverlap(chosen,g_pe[n]))
+      { PETransition(g_pe[selected],EXPIRED,"overlapping opposing eligible zones"); return; }
+   if(!PELowerConfirmed(chosen))
+   { PETransition(g_pe[selected],EXPIRED,"touch lacked required completed M5/M15 rejection; no delayed touch fill"); return; }
+   if(!chosen.manual && (InpOBRequireHTFAlignment || InpEnableForexCryptoConfluence))
+   {
+      string direction=chosen.buy?"BULLISH":"BEARISH";
+      if(g_h1Bias!=direction || (g_h2Bias!=direction && g_h4Bias!=direction))
+      { PETransition(g_pe[selected],EXPIRED,"entry event failed existing HTF confluence requirement"); return; }
+   }
+   PESubmit(g_pe[selected]);
+}
+void PETradeEvent(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result)
+{
+   if(!InpPrecisionEntries) return;
+   if(trans.type==TRADE_TRANSACTION_REQUEST && request.magic==InpAdvisorMagicNumber && request.symbol==_Symbol)
+   {
+      for(int n=0;n<ArraySize(g_pe);n++)
+      {
+         if(StringFind(request.comment,g_pe[n].id)<0 || g_pe[n].request!=result.request_id) continue;
+         bool uncertain=PEUncertainRetcode(result.retcode);
+         if(!uncertain)
+         {
+            g_pe[n].unresolved=false;
+            if(result.retcode!=TRADE_RETCODE_DONE && result.retcode!=TRADE_RETCODE_DONE_PARTIAL && g_pe[n].state==ENTRY_SUBMITTED)
+               PETransition(g_pe[n],INVALIDATED,"broker REQUEST rejection confirmed; setup remains consumed");
+            PEJournal(g_pe[n]);
+         }
+      }
+   }
+   PEReconcile();
+}
+void PESampleShock(string sym)
+{
+   MqlTick q; if(!SymbolInfoTick(sym,q) || q.bid<=0) return;
+   string root=PERoot(sym); double atr=PEATR(sym);
+   if(atr<=0) return;
+   double last=GlobalVariableGet(root+"BID");
+   double range=MathMax(iHigh(sym,PERIOD_M1,0)-iLow(sym,PERIOD_M1,0),iHigh(sym,PERIOD_M1,1)-iLow(sym,PERIOD_M1,1));
+   if(range>MathMin(InpMaxSpikeAtrMultiplier,InpPEShockRangeATR)*atr || (last>0 && MathAbs(q.bid-last)>InpPEShockGapATR*atr))
+   {
+      GlobalVariableSet(root+"SHOCK",(double)(TimeCurrent()+MathMax(1,InpPEShockCooldownMinutes)*60));
+      if(InpPrecisionEntries) PECancelAdvisorOrders(sym);
+   }
+   GlobalVariableSet(root+"BID",q.bid);
+}
+// Legacy/manual paths use identical order preflight, with their existing aggregate planned risk capped.
+bool PELegacyPreflight(string sym,bool buy,double volume,double price,double sl,double tp,double spent,string &why)
+{
+   MqlTradeRequest req; ZeroMemory(req);
+   req.action=TRADE_ACTION_DEAL;req.symbol=sym;req.type=buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+   req.price=price;req.sl=sl;req.tp=tp;req.volume=volume;req.type_filling=PEFill(sym);
+   req.deviation=InpPEDeviationPoints;
+   return PERequestCheck(req,PERiskBudget()-spent,why);
+}
+
+// Draw the precision engine's frozen plan, without feeding UI state back into execution.
+void PEUpdatePlanLines()
+{
+   if(!g_showTradeAdviceLines) { DeleteTradeAdviceLines(); return; }
+   int selected=-1;
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID),distance=0;
+   for(int n=0;n<ArraySize(g_pe);n++)
+   {
+      if(PETerminal(g_pe[n].state) || TimeCurrent()>=g_pe[n].expires) continue;
+      double d=MathAbs(bid-g_pe[n].level);
+      if(selected<0 || d<distance || (d==distance && PEPriorityBefore(g_pe[n],g_pe[selected])))
+      { selected=n;distance=d; }
+   }
+   DeleteTradeAdviceLines();
+   if(selected<0) return;
+   PESetup plan=g_pe[selected];
+   string mode=plan.mode==DIRECT_TOUCH?"DIRECT TOUCH":"BREAKOUT/RETEST";
+   if(plan.mode==BREAKOUT_RETEST && !plan.flip && InpPEBreakoutType==BROKEN_BLOCK_ROLE_FLIP) mode="ROLE-FLIP WATCH";
+   int digits=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
+   string label=(plan.buy?"BUY ":"SELL ")+mode+" | Bid trigger "+DoubleToString(plan.level,digits)+
+      " | state "+IntegerToString(plan.state)+" | "+plan.id;
+   datetime anchor=iTime(_Symbol,_Period,0);if(anchor<=0) anchor=TimeCurrent();
+   CreateChartHLine(PREFIX+"TRDLINE_ENT",plan.level,clrGold,STYLE_DASHDOT,2,label);
+   CreateChartHLine(PREFIX+"TRDLINE_SL",plan.sl,clrTomato,STYLE_DASH,2,"FROZEN PROTECTIVE STOP");
+   CreateChartTextTag(PREFIX+"TRDLINE_ENT_TAG",anchor,plan.level,label,clrGold,"Trebuchet MS",9);
+   CreateChartTextTag(PREFIX+"TRDLINE_SL_TAG",anchor,plan.sl,"SL "+DoubleToString(plan.sl,digits),clrTomato,"Trebuchet MS",9);
+}
+
 int OnInit()
 {
    g_runtimeReady = false;
@@ -1306,6 +2201,7 @@ void RunAdvisorStrategyEngine(bool forceScan, bool allowAutoTrade)
    SEGSCalibrateActiveZoneProtection();
    UpdateOBLocationSnapshot(_Symbol);
    UpdateH1OBLocationSnapshot(_Symbol);
+   PEDiscover();
    if(allowAutoTrade)
       CheckAndAutoTradeAdvice();
 }
@@ -1322,13 +2218,17 @@ void OnTick()
    if(g_currentMode == MODE_COMPLETE_AUTO)
       ProcessUnassignedPositions();
 
-   // Independent Strategy Evaluation on Tick
+   // Shock sampling and armed entry monitoring are never scan-throttled.
+   PESampleShock(_Symbol);
+   PEMonitor();
    RunAdvisorStrategyEngine(false, true);
+   PEMonitor();
 
    ulong nowMs = GetTickCount64();
    if(nowMs - g_lastTickUpdateTime >= 200)
    {
       g_lastTickUpdateTime = nowMs;
+      if(InpPrecisionEntries) UpdateTradeAdviceLines();
       DrawUnifiedTerminalDashboard();
       if(g_showSentimentHUD) DrawSentimentHUD();
       if(g_showOpenTradeMarkings) UpdateOpenTradeMarkings();
@@ -1379,7 +2279,10 @@ void OnTimer()
    EnforcePositionStopLossAndTargets();
    CheckBreakevenConditions();
    CheckTrailingClose();
+   PESampleShock(_Symbol);
    RunAdvisorStrategyEngine(false, true);
+   PEMonitor();
+   if(InpPrecisionEntries) UpdateTradeAdviceLines();
    GlobalVariableSet("SEGS_PHASE_" + IntegerToString(ChartID()), 4.0);
    DrawUnifiedTerminalDashboard();
    if(g_showSentimentHUD) DrawSentimentHUD();
@@ -1393,6 +2296,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest &request,
                         const MqlTradeResult &result)
 {
+   PETradeEvent(trans,request,result);
    if(!g_runtimeReady) return; // Startup reconstruction recovers trades once history is ready.
    // 1. Detect new DEAL_ADD (Market position filled or closed)
    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
@@ -1612,12 +2516,25 @@ void DuplicateTrade(ulong masterTicket, ulong masterPosId, string sym, ENUM_POSI
       double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
       double bid = SymbolInfoDouble(sym, SYMBOL_BID);
 
+      double cloneSL=0.0, cloneTP=0.0;
+      if(!posInfo.SelectByTicket(masterTicket)) break;
+      cloneSL=posInfo.StopLoss();
+      double cloneSLPips=0.0, cloneTargets[4];
+      GetAssetTargets(sym,cloneSLPips,cloneTargets[0],cloneTargets[1],cloneTargets[2],cloneTargets[3]);
+      double clonePrice=ptype==POSITION_TYPE_BUY?ask:bid;
+      cloneTP=NormalizePriceToTickSize(sym,ptype==POSITION_TYPE_BUY?openPrice+cloneTargets[cloneIdx]*GetPipSize(sym):openPrice-cloneTargets[cloneIdx]*GetPipSize(sym));
+      double cloneRisk=CalcRiskFromSL(masterTicket),oneRisk=0.0;
+      if(!OrderCalcProfit(ptype==POSITION_TYPE_BUY?ORDER_TYPE_BUY:ORDER_TYPE_SELL,sym,tradeVol,clonePrice,cloneSL,oneRisk)) break;
+      string cloneWhy="";
+      if(!PELegacyPreflight(sym,ptype==POSITION_TYPE_BUY,tradeVol,clonePrice,cloneSL,cloneTP,cloneRisk+successfulClones*MathAbs(oneRisk),cloneWhy))
+      { PrintFormat("[PE final gate] Clone skipped: %s",cloneWhy); break; }
+      trade.SetDeviationInPoints(InpPEDeviationPoints);
       ResetLastError();
       bool ok = false;
       if(ptype == POSITION_TYPE_BUY)
-         ok = trade.Buy(tradeVol, sym, ask, 0.0, 0.0, comment);
+         ok = trade.Buy(tradeVol, sym, ask, cloneSL, cloneTP, comment);
       else
-         ok = trade.Sell(tradeVol, sym, bid, 0.0, 0.0, comment);
+         ok = trade.Sell(tradeVol, sym, bid, cloneSL, cloneTP, comment);
 
       uint retcode = trade.ResultRetcode();
       if(!ok || (retcode != TRADE_RETCODE_DONE && retcode != TRADE_RETCODE_PLACED))
@@ -3348,6 +4265,7 @@ void DrawTradeAdviceLines(double entry, double sl, double tp1, double tp2, doubl
 
 void UpdateTradeAdviceLines()
 {
+   if(InpPrecisionEntries && CountOpenAdvisorTradesForSymbol(_Symbol)==0) { PEUpdatePlanLines(); return; }
    if(!g_showTradeAdviceLines)
    {
       DeleteTradeAdviceLines();
@@ -10605,7 +11523,7 @@ void ScanMarketStructureAndAdvice(bool forceScan=false)
          {
             // Confirmed bounce off safe zone! Check portfolio ceiling
             int openAdvTrades = CountTotalOpenAdvisorTrades();
-            int portfolioCeiling = MathMax(24, InpMaxOpenAdvisorTradesPortfolio);
+            int portfolioCeiling = MathMin(InpAdvisorMaxTotalOpenTrades, InpMaxOpenAdvisorTradesPortfolio);
             if(openAdvTrades >= portfolioCeiling || openSafeCount >= InpAdvisorMaxTradesPerSetup)
             {
                g_setupState = "TRIGGERED";
@@ -13643,6 +14561,10 @@ void CheckCircuitBreaker(string sym, bool &outBlocked, string &outReason, int &o
 //+------------------------------------------------------------------+
 void ExecuteAdvisedTrade(bool isAutoTrade=false)
 {
+   if(InpPrecisionEntries) { PEMonitor(); return; }
+   if(GlobalVariableGet(PERoot(_Symbol)+"BUSY")>0) return;
+   if(g_lastSignalConfirmationTime<GlobalVariableGet(PERoot(_Symbol)+"SHOCK"))
+   { Print("[PE] Pre-shock legacy signal blocked: fresh confirmation after stabilization required."); return; }
    if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
    string sym = _Symbol;
 
@@ -13863,6 +14785,12 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
       return;
    }
 
+   if(GlobalVariableCheck(sigExecKey))
+   {
+      Print("[Advisor Execution] Signal already submitted/consumed; no blind retry.");
+      return;
+   }
+
    // 8. Set-Capacity Rule: Advisor may open at most 2 sets of trades for a single instrument simultaneously
    int openSetsOnSym = CountOpenAdvisorSetsForSymbol(sym);
    if(openSetsOnSym >= InpMaxSetsPerSymbol)
@@ -13880,7 +14808,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    }
 
    // 9. Portfolio Cap (Enforce 16 ceiling)
-   int portfolioCeiling = MathMax(24, InpMaxOpenAdvisorTradesPortfolio);
+   int portfolioCeiling = MathMin(InpAdvisorMaxTotalOpenTrades, InpMaxOpenAdvisorTradesPortfolio);
    int openAdvTrades = CountTotalOpenAdvisorTrades();
    if(openAdvTrades >= portfolioCeiling)
    {
@@ -14097,6 +15025,8 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    for(int k = 0; k < 4; k++) { actualPositionTickets[k] = 0; actualPositionIds[k] = 0; legSuccess[k] = false; }
    int successCount = 0;
 
+   double peSpentRisk = 0.0;
+   bool peLegacyUncertain = false;
    // 15. Execute Legs with Resilient Fallbacks
    for(int leg = 0; leg < legsToExecute; leg++)
    {
@@ -14115,6 +15045,16 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
          continue;
       }
 
+      string peWhy = "";
+      if(!PELegacyPreflight(sym,g_currentAdvisedAction=="BUY",legLot,sendPrice,legSL,legTP,peSpentRisk,peWhy))
+      {
+         PrintFormat("[PE final gate] Legacy leg skipped: %s",peWhy);
+         break;
+      }
+      double peLoss=0.0;
+      if(!OrderCalcProfit(g_currentAdvisedAction=="BUY"?ORDER_TYPE_BUY:ORDER_TYPE_SELL,sym,legLot,sendPrice,legSL,peLoss)) break;
+      peSpentRisk+=MathAbs(peLoss);
+      trade.SetDeviationInPoints(InpPEDeviationPoints);
       ResetLastError();
       bool ok = false;
       if(g_currentAdvisedAction == "BUY")
@@ -14123,25 +15063,14 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
          ok = trade.Sell(legLot, sym, sendPrice, legSL, legTP, comment);
 
       uint ret = trade.ResultRetcode();
-
-      // Fallback A: If filling mode unsupported, try alternative modes
-      if(!ok && (ret == 10030 || ret == TRADE_RETCODE_INVALID_ORDER))
+      if(PEUncertainRetcode(ret) || ret==TRADE_RETCODE_DONE_PARTIAL)
       {
-         trade.SetTypeFilling(ORDER_FILLING_RETURN);
-         sendPrice = (g_currentAdvisedAction == "BUY") ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID);
-         legSL = g_staticSL;
-         legTP = targetTP;
-         if(legSL <= 0.0 || !ValidateProtectionLevels(sym, ptype, sendPrice, legSL, legTP))
-      {
-         PrintFormat("[SEGS EXEC] Leg %d deferred: protection not valid at live quote", leg + 1);
-         continue;
-      }
-         ResetLastError();
-         if(g_currentAdvisedAction == "BUY")
-            ok = trade.Buy(legLot, sym, sendPrice, legSL, legTP, comment);
-         else
-            ok = trade.Sell(legLot, sym, sendPrice, legSL, legTP, comment);
-         ret = trade.ResultRetcode();
+         peLegacyUncertain=true;
+         GlobalVariableSet(PERoot(sym)+"BUSY",(double)TimeCurrent());
+         GlobalVariableSet(PERoot(sym)+"LEGACY",1.0);
+         GlobalVariablesFlush();
+         Print("[PE] Legacy partial/uncertain result: symbol reserved for reconciliation; no further legs.");
+         break;
       }
 
       // Invalid stops defer the trade; never retry with an unprotected market order.
@@ -14174,10 +15103,10 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    // 16. Post-Execution Evaluation
    if(successCount == 0)
    {
-      PrintFormat("[Advisor Execution] All legs failed to open for signal %s. Clearing pending state.", g_currentSignalID);
-      GlobalVariableDel(sigExecKey);
-      GlobalVariableDel(pendingTimeKey);
-      g_currentTradeTaken = false;
+      PrintFormat("[Advisor Execution] Signal %s consumed; partial/uncertain=%s. No automatic retry.", g_currentSignalID,peLegacyUncertain?"true":"false");
+      // Submitted/rejected/uncertain signals remain consumed, including partial fills.
+      GlobalVariableSet(sigExecKey, 3.0);
+      g_currentTradeTaken = true;
       trade.SetExpertMagicNumber(InpMasterMagicNumber);
       ReleaseAccountLock("ADVISOR_EXEC");
       return;
@@ -14230,6 +15159,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
 
 void CheckAndAutoTradeAdvice()
 {
+   if(InpPrecisionEntries) return; // Per-tick engine exclusively owns these entries.
    if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
    // 1. Advisor Enabled check
    if(!g_myAdvisorEnabled) return;
@@ -14485,7 +15415,7 @@ void CheckAndAutoTradeAdvice()
    }
 
    // 6. Portfolio exposure limit (strictly respects the full configured ceiling, e.g. 16)
-   int portfolioCeiling = MathMax(24, InpMaxOpenAdvisorTradesPortfolio);
+   int portfolioCeiling = MathMin(InpAdvisorMaxTotalOpenTrades, InpMaxOpenAdvisorTradesPortfolio);
    int currentAdvisorTrades = CountTotalOpenAdvisorTrades();
    if(currentAdvisorTrades >= portfolioCeiling)
    {
@@ -14493,55 +15423,12 @@ void CheckAndAutoTradeAdvice()
       return;
    }
 
-   // 7. Check if signal execution key is completed
+   // Never infer non-execution from a temporarily absent position.
    string sigExecKey = "SEGS_SIG_EXEC_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + g_currentSignalID;
    if(GlobalVariableCheck(sigExecKey))
    {
-      double state = GlobalVariableGet(sigExecKey);
-      if(state >= 2.0)
-      {
-         if(CountOpenAdvisorTradesForSymbol(_Symbol) > 0)
-         {
-            g_currentTradeTaken = true;
-            return;
-         }
-         else
-         {
-            GlobalVariableDel(sigExecKey);
-            g_currentTradeTaken = false;
-         }
-      }
-      else if(state == 1.0)
-      {
-         // If marked pending, verify whether positions actually exist on the account
-         string shortSig = (StringLen(g_currentSignalID) > 16) ? StringSubstr(g_currentSignalID, StringLen(g_currentSignalID) - 16) : g_currentSignalID;
-         bool foundPos = false;
-         for(int p = PositionsTotal() - 1; p >= 0; p--)
-         {
-            ulong pt = PositionGetTicket(p);
-            if(pt > 0 && posInfo.SelectByTicket(pt))
-            {
-               if(posInfo.Magic() == InpAdvisorMagicNumber && StringFind(posInfo.Comment(), shortSig) >= 0)
-               {
-                  foundPos = true;
-                  break;
-               }
-            }
-         }
-         if(foundPos)
-         {
-            GlobalVariableSet(sigExecKey, 2.0);
-            g_currentTradeTaken = true;
-            return;
-         }
-         else
-         {
-            // Stale or failed attempt: remove pending lock so trade executes immediately!
-            GlobalVariableDel(sigExecKey);
-            string pendingTimeKey = "SEGS_SIG_PENDING_TIME_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "_" + g_currentSignalID;
-            GlobalVariableDel(pendingTimeKey);
-         }
-      }
+      g_currentTradeTaken = true;
+      return;
    }
 
    // 8. Execute Advised Trade!
@@ -17418,8 +18305,15 @@ void ActivateAllPendingOrders()
          double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
          double bid = SymbolInfoDouble(sym, SYMBOL_BID);
 
+         if(InpPrecisionEntries && orderInfo.Magic()==InpAdvisorMagicNumber) continue;
+         string pendingWhy="";
+         if(!PELegacyPreflight(sym,isBuy,vol,isBuy?ask:bid,sl,tp,0.0,pendingWhy))
+         { PrintFormat("[PE final gate] Pending activation skipped: %s",pendingWhy); continue; }
+         // Confirm cancellation BEFORE conversion to avoid two live entry paths.
+         if(!trade.OrderDelete(ticket) || trade.ResultRetcode()!=TRADE_RETCODE_DONE) continue;
+         trade.SetDeviationInPoints(InpPEDeviationPoints);
          bool ok = isBuy ? trade.Buy(vol, sym, ask, sl, tp) : trade.Sell(vol, sym, bid, sl, tp);
-         if(ok) trade.OrderDelete(ticket);
+         if(!ok) Print("[PE] Pending conversion failed after confirmed cancellation; no retry.");
       }
    }
 }

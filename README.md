@@ -60,3 +60,9 @@ Trade calls are deliberately deferred until readiness; this is a lifecycle safeg
 ## v3.75 compile correction
 
 Removed the obsolete fixed-price GBPUSD target branch and its two undeclared `isGBPUSD` references (reported at lines 7159 and 7200). All symbols use structural candidate levels with risk/ATR fallbacks; optional opposing-liquidity TP3 mapping also applies to GBPUSD. Prior dual-stop and startup safeguards are retained. Native MetaEditor compilation remains required.
+
+## Precision direct-touch and breakout/retest extension
+
+The actual entry engine now includes an opt-in persistent quote-driven setup state machine. Read [the conflict audit](docs/ENTRY_ENGINE_AUDIT.md), [all settings and behaviour](docs/PRECISION_ENTRIES.md), and [verification results and remaining MT5 checks](docs/VALIDATION.md) before enabling `InpPrecisionEntries`. Breakout/retest interpretation starts unselected. Shared final risk, spread/session/shock controls also protect legacy, clone and pending-activation entry paths.
+
+Run `python tests/test_precision.py`, `python tests/test_precision_execution.py`, `python tests/test_precision_reconciliation.py`, `python tests/test_precision_risk.py`, and `python tests/verify_source.py`. These compile extracted functions using g++ with MT5 API stubs, and check source synchronization. They do not compile MQL5 or exercise a broker.
