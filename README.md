@@ -1,4 +1,4 @@
-# SEGS-BOT — full EA v3.75
+# SEGS-BOT — full EA v3.76
 
 [Download the full MT5 source](https://raw.githubusercontent.com/segunobisesan2-dev/SEGS-BOT/main/SEGS_Trade_Manager_Pro_v3.75.mq5)
 
@@ -60,3 +60,15 @@ Trade calls are deliberately deferred until readiness; this is a lifecycle safeg
 ## v3.75 compile correction
 
 Removed the obsolete fixed-price GBPUSD target branch and its two undeclared `isGBPUSD` references (reported at lines 7159 and 7200). All symbols use structural candidate levels with risk/ATR fallbacks; optional opposing-liquidity TP3 mapping also applies to GBPUSD. Prior dual-stop and startup safeguards are retained. Native MetaEditor compilation remains required.
+
+## Planned-entry execution trigger
+
+Automatic execution now requires the live BUY Ask / SELL Bid to touch the planned entry line (half a trade tick for rounding), or be inside a non-invalidated, same-direction M30/H1 order block containing that planned line. A viable WATCHING plan can execute on contact without waiting for another candle confirmation; existing trend/chop checks still apply. READY/TRIGGERED status alone, historical candle wicks, broad ATR proximity and unrelated blocks cannot authorize execution. The trigger is checked again at submission. An entry inside its containing block is not rejected merely for distance from the line. Existing permissions, stop protection, circuit breaker, duplicate protection and exposure checks remain. Manual execution retains its existing behavior. No native MT5 compiler is available here; compile and validate BUY/SELL contacts on demo.
+
+## v3.76 — remove recursive strategy scanning from the HUD
+
+Found a direct call cycle: DrawSentimentHUD called ScanMarketStructureAndAdvice, and scanner branches called DrawSentimentHUD before returning. The cycle also included execution and account synchronization paths. Removed both strategy scanning and matrix recomputation from the drawing function; the scheduled strategy engine owns updates and the HUD renders its latest snapshot. This eliminates the identified recursive call graph, which can exhaust the stack. It does not establish that every reported USDCHF/EURUSD detachment has the same cause without terminal logs.
+
+The complete new source is SEGS_Trade_Manager_Pro_v3.76.mq5. Older filenames are synchronized compatibility copies with internal version 3.76. Planned-line/containing-block execution and previous stop safeguards are retained. Deinitialization logs now include a named terminal reason and build number, alongside the original numeric reason/error/phase. Fatal runtime errors may stop the EA before OnDeinit logs; capture preceding Experts and Journal lines too.
+
+Validation: the recursion regression rejects the pre-fix source and accepts the new source; existing extracted C++ stop/entry/expiry tests and synchronization/lexical checks pass. No native MetaEditor compiler or MT5 runtime is installed here. Compile v3.76 with F7, attach the newly compiled EA on USDCHF and EURUSD demo charts, and verify the Experts initialization banner says v3.76. Test HUD toggles, setup cancellation, plan contact, account-wide setting changes, and timeframe changes.

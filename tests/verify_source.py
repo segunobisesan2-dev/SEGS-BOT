@@ -26,6 +26,12 @@ assert 'input ENUM_SEGS_SL_STYLE InpStructuralStopStyle = SL_STYLE_AUTO_DUAL;' i
 assert 'if(!MathIsValidNumber(pipSize) || pipSize <= 0.0) return tp;' in s
 assert s.count('!MathIsValidNumber(tickVal) || tickVal <= 0.0) return 0.0;') >= 2
 assert 'SEGS_DASH_VIS_' in s and 'SEGS_SYNC_SYS' in s
+a_entry=s.index('bool SEGSPriceInPlannedBlock(');b_entry=s.index('void ExecuteAdvisedTrade(bool isAutoTrade=false)')
+assert s[a_entry:b_entry] in (root/'tests/planned_entry_test.cpp').read_text()
+auto=s[s.index('void CheckAndAutoTradeAdvice()\n{'):]
+assert 'if(!SEGSPlannedEntryTouched(_Symbol))' in auto
+assert 'if(isAutoTrade && !SEGSPlannedEntryTouched(sym))' in s
+assert 'isWithinSlippage ||' not in auto
 clean=re.sub(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'','',s)
 stack=[]
 for c in clean:
@@ -33,7 +39,7 @@ for c in clean:
  elif c in ')}]':assert stack and stack.pop()=={')':'(',']':'[','}':'{'}[c]
 assert not stack
 with tempfile.TemporaryDirectory() as tmp:
- for name in ['structural_stop_test','stop_guard_regression','expired_signal_test']:
+ for name in ['structural_stop_test','stop_guard_regression','expired_signal_test','planned_entry_test']:
   target=str(Path(tmp)/name)
   subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',str(root/'tests'/f'{name}.cpp'),'-o',target],check=True)
   subprocess.run([target],check=True)

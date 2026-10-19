@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.75.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.76.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.75 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.76 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.75"
+#property version   "3.76"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -996,7 +996,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.75 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.76 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1083,7 +1083,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.75 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.76 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -1192,8 +1192,27 @@ void ResetMarketQualityState(string newSym)
    InitIndicatorHandles(newSym);
 }
 
+string SEGSDeinitReasonText(int reason)
+{
+   switch(reason)
+   {
+      case REASON_PROGRAM: return "PROGRAM_REQUESTED_REMOVAL";
+      case REASON_REMOVE: return "REMOVED_FROM_CHART";
+      case REASON_RECOMPILE: return "RECOMPILED";
+      case REASON_CHARTCHANGE: return "SYMBOL_OR_TIMEFRAME_CHANGED";
+      case REASON_CHARTCLOSE: return "CHART_CLOSED";
+      case REASON_PARAMETERS: return "INPUTS_CHANGED";
+      case REASON_ACCOUNT: return "ACCOUNT_CHANGED";
+      case REASON_TEMPLATE: return "TEMPLATE_APPLIED";
+      case REASON_INITFAILED: return "INITIALIZATION_FAILED";
+      case REASON_CLOSE: return "TERMINAL_CLOSED";
+   }
+   return "UNKNOWN_REASON";
+}
+
 void OnDeinit(const int reason)
 {
+   PrintFormat("[SEGS DEINIT DETAIL] build=3.76 reason=%s; check preceding Experts/Journal lines for fatal runtime errors.", SEGSDeinitReasonText(reason));
    PrintFormat("[SEGS DEINIT] reason=%d, lastError=%d, symbol=%s, chart=%I64d, phase=%.0f", reason, GetLastError(), _Symbol, ChartID(), GlobalVariableGet("SEGS_PHASE_" + IntegerToString(ChartID())));
    g_runtimeReady = false;
    GlobalVariableDel("SEGS_HB_" + IntegerToString(ChartID()));
@@ -1321,6 +1340,9 @@ void OnTick()
 
    if(g_currentMode == MODE_COMPLETE_AUTO)
       ProcessUnassignedPositions();
+
+   // Evaluate the displayed plan on every live tick, before the throttled rescan.
+   CheckAndAutoTradeAdvice();
 
    // Independent Strategy Evaluation on Tick
    RunAdvisorStrategyEngine(false, true);
@@ -13641,6 +13663,41 @@ void CheckCircuitBreaker(string sym, bool &outBlocked, string &outReason, int &o
 //+------------------------------------------------------------------+
 //| Execute Advised Trade Setup with Rollback & Safety Gates         |
 //+------------------------------------------------------------------+
+// Live prices only: old candle wicks and strategy TRIGGERED state cannot authorize entry.
+bool SEGSPriceInPlannedBlock(const M30OrderBlock &ob, bool buy, double entry, double price)
+{
+   return !ob.invalidated && ob.bullish == buy &&
+          MathIsValidNumber(ob.low) && MathIsValidNumber(ob.high) &&
+          ob.low > 0.0 && ob.high > ob.low &&
+          entry >= ob.low && entry <= ob.high && price >= ob.low && price <= ob.high;
+}
+
+bool SEGSPlannedEntryTouched(string sym)
+{
+   if(!g_hasViableEntry || g_isSignalExpired || g_currentTradeTaken ||
+      g_currentSignalID == "" ||
+      (g_setupState != "WATCHING" && g_setupState != "READY" && g_setupState != "TRIGGERED") ||
+      (g_currentAdvisedAction != "BUY" && g_currentAdvisedAction != "SELL")) return false;
+   double entry = g_staticEntryPrice;
+   if(!MathIsValidNumber(entry) || entry <= 0.0 ||
+      !MathIsValidNumber(g_staticSL) || g_staticSL <= 0.0) return false;
+   MqlTick quote;
+   if(!SymbolInfoTick(sym, quote) || !MathIsValidNumber(quote.ask) ||
+      !MathIsValidNumber(quote.bid) || quote.bid <= 0.0 || quote.ask < quote.bid) return false;
+   bool buy = (g_currentAdvisedAction == "BUY");
+   double price = buy ? quote.ask : quote.bid;
+   if((buy && price <= g_staticSL) || (!buy && price >= g_staticSL)) return false;
+   double tick = SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE);
+   if(!MathIsValidNumber(tick) || tick <= 0.0) return false;
+   // Half a trade tick handles rounding; no ATR/pip proximity allowance.
+   if(MathAbs(price - entry) <= tick * 0.5) return true;
+   for(int k = 0; k < ArraySize(g_orderBlocks); k++)
+      if(SEGSPriceInPlannedBlock(g_orderBlocks[k], buy, entry, price)) return true;
+   for(int k = 0; k < ArraySize(g_h1OrderBlocks); k++)
+      if(SEGSPriceInPlannedBlock(g_h1OrderBlocks[k], buy, entry, price)) return true;
+   return false;
+}
+
 void ExecuteAdvisedTrade(bool isAutoTrade=false)
 {
    if(!g_runtimeReady || !SEGSMarketReady(_Symbol)) return;
@@ -13721,7 +13778,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    // 2. Setup Viability Check: Must be in READY or TRIGGERED state with confirmed entry
    // Note: We deliberately do NOT re-call ScanMarketStructureAndAdvice(true) here because minor tick noise
    // would reset g_setupState to WATCHING and falsely destroy the viable trade!
-   if(!g_hasViableEntry || g_isSignalExpired || (g_setupState != "TRIGGERED" && g_setupState != "READY"))
+   if(!g_hasViableEntry || g_isSignalExpired || (g_setupState != "TRIGGERED" && g_setupState != "READY" && !(isAutoTrade && g_setupState == "WATCHING")))
    {
       string msg = "[Trade Advisor] EXECUTION BLOCKED: Setup state is not READY / TRIGGERED (State: " + g_setupState + ", Reason: " + g_blockReason + ")";
       Print(msg);
@@ -13749,6 +13806,13 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
 
    g_telemetry.ordersAttempted++;
    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+
+   // Recheck at order submission, including strategy paths that already set TRIGGERED.
+   if(isAutoTrade && !SEGSPlannedEntryTouched(sym))
+   {
+      g_autoExecDetail = "WAITING FOR PLANNED ENTRY LINE / ITS ORDER BLOCK";
+      return;
+   }
 
    // 4. Live execution price
    double curPrice = (g_currentAdvisedAction == "BUY") ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID);
@@ -13791,7 +13855,7 @@ void ExecuteAdvisedTrade(bool isAutoTrade=false)
    double spreadPtsExec = (double)SymbolInfoInteger(sym, SYMBOL_SPREAD) * SymbolInfoDouble(sym, SYMBOL_POINT);
    double drift = MathAbs(curPrice - g_staticEntryPrice);
    double maxAllowedDrift = MathMax(0.75 * curAtr, MathMax(25.0 * pip, spreadPtsExec * 3.5));
-   if(drift > maxAllowedDrift && g_setupState != "TRIGGERED")
+   if(drift > maxAllowedDrift && g_setupState != "TRIGGERED" && !isAutoTrade)
    {
       PrintFormat("[Trade Advisor] EXECUTION BLOCKED: Price drifted %.1f pips from entry (Max allowed: %.1f pips).",
                   drift / GetPipSize(sym), maxAllowedDrift / GetPipSize(sym));
@@ -14346,55 +14410,6 @@ void CheckAndAutoTradeAdvice()
       return;
    }
 
-   double entryDist = MathAbs(curP - g_staticEntryPrice);
-   double maxEntryExecDist = MathMax(0.50 * cAtr, 20.0 * pSize);
-
-   // Check if price is currently inside or touching an unmitigated Order Block zone in setup direction (both M30 & H1)
-   bool isInsideOrTouchingOB = false;
-   for(int k = 0; k < ArraySize(g_orderBlocks); k++)
-   {
-      if(g_orderBlocks[k].invalidated) continue;
-      if(g_currentAdvisedAction == "SELL" && !g_orderBlocks[k].bullish)
-      {
-         if(curP <= g_orderBlocks[k].high + 6.0 * pSize && curP >= g_orderBlocks[k].low - MathMax(0.35 * cAtr, 12.0 * pSize))
-         {
-            isInsideOrTouchingOB = true;
-            break;
-         }
-      }
-      else if(g_currentAdvisedAction == "BUY" && g_orderBlocks[k].bullish)
-      {
-         if(curP >= g_orderBlocks[k].low - 6.0 * pSize && curP <= g_orderBlocks[k].high + MathMax(0.35 * cAtr, 12.0 * pSize))
-         {
-            isInsideOrTouchingOB = true;
-            break;
-         }
-      }
-   }
-   if(!isInsideOrTouchingOB)
-   {
-      for(int k = 0; k < ArraySize(g_h1OrderBlocks); k++)
-      {
-         if(g_h1OrderBlocks[k].invalidated) continue;
-         if(g_currentAdvisedAction == "SELL" && !g_h1OrderBlocks[k].bullish)
-         {
-            if(curP <= g_h1OrderBlocks[k].high + 6.0 * pSize && curP >= g_h1OrderBlocks[k].low - MathMax(0.35 * cAtr, 12.0 * pSize))
-            {
-               isInsideOrTouchingOB = true;
-               break;
-            }
-         }
-         else if(g_currentAdvisedAction == "BUY" && g_h1OrderBlocks[k].bullish)
-         {
-            if(curP >= g_h1OrderBlocks[k].low - 6.0 * pSize && curP <= g_h1OrderBlocks[k].high + MathMax(0.35 * cAtr, 12.0 * pSize))
-            {
-               isInsideOrTouchingOB = true;
-               break;
-            }
-         }
-      }
-   }
-
    // Final Pre-Execution Gate: Directional Confluence & Chop Immunity Check (Bypassed if TRIGGERED setup already approved by strategy engine)
    bool h1IsBull = (g_h1Bias == "BULLISH");
    bool h4IsBull = (g_h4Bias == "BULLISH");
@@ -14417,63 +14432,10 @@ void CheckAndAutoTradeAdvice()
       }
    }
 
-   // Touch and slippage allowance: must accommodate broker spread and fast volatility
-   double spreadPtsExec = (double)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   if(pt <= 0.0) pt = 0.00001;
-
-   // Dynamic Volatility-Scaled Slippage Buffer:
-   double dynSlippageBuffer = MathMax(0.40 * cAtr, MathMax(12.0 * pSize, spreadPtsExec * 2.5));
-   maxEntryExecDist = MathMax(0.75 * cAtr, MathMax(25.0 * pSize, spreadPtsExec * 3.5));
-
-   // Configure trade deviation to prevent broker REQUOTE during fast volatility
-   ulong dynDeviation = (ulong)MathMax(150.0, MathMax(0.50 * cAtr / pt, spreadPtsExec * 3.0 / pt));
-   trade.SetDeviationInPoints(dynDeviation);
-
-   // Recent wick touch detection on M1: allows faster reaction time when price wicks into zone and bounces
-   double l0_M1 = iLow(_Symbol, PERIOD_M1, 0);
-   double l1_M1 = iLow(_Symbol, PERIOD_M1, 1);
-   double h0_M1 = iHigh(_Symbol, PERIOD_M1, 0);
-   double h1_M1 = iHigh(_Symbol, PERIOD_M1, 1);
-   double minRecentLow = MathMin(l0_M1, l1_M1);
-   double maxRecentHigh = MathMax(h0_M1, h1_M1);
-
-   double l0_M5 = iLow(_Symbol, PERIOD_M5, 0), l1_M5 = iLow(_Symbol, PERIOD_M5, 1);
-   double h0_M5 = iHigh(_Symbol, PERIOD_M5, 0), h1_M5 = iHigh(_Symbol, PERIOD_M5, 1);
-   double l0_M15 = iLow(_Symbol, PERIOD_M15, 0);
-   double h0_M15 = iHigh(_Symbol, PERIOD_M15, 0);
-   if(l0_M5 > 0.0) minRecentLow = MathMin(minRecentLow, l0_M5);
-   if(l1_M5 > 0.0) minRecentLow = MathMin(minRecentLow, l1_M5);
-   if(l0_M15 > 0.0) minRecentLow = MathMin(minRecentLow, l0_M15);
-   if(h0_M5 > 0.0) maxRecentHigh = MathMax(maxRecentHigh, h0_M5);
-   if(h1_M5 > 0.0) maxRecentHigh = MathMax(maxRecentHigh, h1_M5);
-   if(h0_M15 > 0.0) maxRecentHigh = MathMax(maxRecentHigh, h0_M15);
-
-   bool priceAtPlannedZone = false;
-   if(g_currentAdvisedAction == "BUY")
+   // Every automatic path must touch the current plan, even when already TRIGGERED.
+   if(!SEGSPlannedEntryTouched(_Symbol))
    {
-      priceAtPlannedZone = (g_staticEntryPrice > 0.0 && 
-                           (curP <= g_staticEntryPrice + dynSlippageBuffer || minRecentLow <= g_staticEntryPrice + dynSlippageBuffer) &&
-                           (g_staticSL > 0.0 ? curP >= g_staticSL : true));
-   }
-   else if(g_currentAdvisedAction == "SELL")
-   {
-      priceAtPlannedZone = (g_staticEntryPrice > 0.0 && 
-                           (curP >= g_staticEntryPrice - dynSlippageBuffer || maxRecentHigh >= g_staticEntryPrice - dynSlippageBuffer) &&
-                           (g_staticSL > 0.0 ? curP <= g_staticSL : true));
-   }
-
-   bool isWithinSlippage = (g_staticEntryPrice > 0.0) && (entryDist <= dynSlippageBuffer || priceAtPlannedZone);
-
-   // Pre-execution execution distance check:
-   // If price is within slippageBuffer of planned entry, OR if setup is TRIGGERED and within safe distance, execute!
-   if(isWithinSlippage || (g_setupState == "TRIGGERED" && entryDist <= maxEntryExecDist) || isInsideOrTouchingOB)
-   {
-      // Planned entry touch confirmed: proceed to execution
-   }
-   else
-   {
-      g_autoExecDetail = StringFormat("AWAITING PULLBACK (Price %.1fp from entry %s)", entryDist / pSize, DoubleToString(g_staticEntryPrice, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)));
+      g_autoExecDetail = "WAITING FOR PLANNED ENTRY LINE / ITS ORDER BLOCK";
       return;
    }
 
@@ -16089,8 +16051,8 @@ void DrawSentimentHUD()
    string sym = _Symbol;
    int symDigits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
 
-   ScanMarketStructureAndAdvice(false);
-   UpdateUnifiedStrategyMatrix(sym);
+   // Render the last engine snapshot only. Calling the scanner here recurses
+   // through scanner -> HUD -> scanner and can terminate the EA on stack overflow.
 
    // Outer Background Panel (Strict Z-Order 30)
    CreateOrUpdatePanel(PREFIX + "SNT_BG", sx, sy, sw, sh, C'10,13,20', C'28,40,62', CORNER_LEFT_UPPER);
@@ -16704,7 +16666,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.75", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.76", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {
