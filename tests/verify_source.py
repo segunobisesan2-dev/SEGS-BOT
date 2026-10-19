@@ -32,6 +32,12 @@ auto=s[s.index('void CheckAndAutoTradeAdvice()\n{'):]
 assert 'if(!SEGSPlannedEntryTouched(_Symbol))' in auto
 assert 'if(isAutoTrade && !SEGSPlannedEntryTouched(sym))' in s
 assert 'isWithinSlippage ||' not in auto
+guard_start=s.index('bool g_strategyScanRunning = false;')
+guard_end=s.index('void ScanMarketStructureAndAdvice(bool forceScan=false)\n{',guard_start)
+assert s[guard_start:guard_end] in (root/'tests/scan_guard_test.cpp').read_text()
+assert 'SEGSStrategyScanGuard scanGuard;\n   if(!scanGuard.Entered()) return;' in s
+from verify_runtime_graph import check_source
+check_source(s)
 clean=re.sub(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'','',s)
 stack=[]
 for c in clean:
@@ -39,7 +45,7 @@ for c in clean:
  elif c in ')}]':assert stack and stack.pop()=={')':'(',']':'[','}':'{'}[c]
 assert not stack
 with tempfile.TemporaryDirectory() as tmp:
- for name in ['structural_stop_test','stop_guard_regression','expired_signal_test','planned_entry_test']:
+ for name in ['structural_stop_test','stop_guard_regression','expired_signal_test','planned_entry_test','scan_guard_test']:
   target=str(Path(tmp)/name)
   subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',str(root/'tests'/f'{name}.cpp'),'-o',target],check=True)
   subprocess.run([target],check=True)

@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                SEGS_Trade_Manager_Pro_v3.76.mq5 |
+//|                                SEGS_Trade_Manager_Pro_v3.77.mq5 |
 //|        Unified Zero-Flicker MT5 Terminal Table Dashboard         |
 //|                 Full Replacement for MT5 Native Toolbox          |
 //|  Multi-Asset: XAU (Gold), DJ30, NAS100, GBPJPY, BTCUSD & AMD     |
@@ -13,9 +13,9 @@
 //|  Execution Timestamp Tracking in Market Sentiment Dashboard      |
 //|  Copyright 2026, SEGS Trade Manager Pro - All Rights Reserved    |
 //+------------------------------------------------------------------+
-#property copyright "SEGS Trade Manager Pro v3.76 (Unified Multi-Strategy Confluence)"
+#property copyright "SEGS Trade Manager Pro v3.77 (Unified Multi-Strategy Confluence)"
 #property link      "https://ai.studio/build"
-#property version   "3.76"
+#property version   "3.77"
 #property strict
 
 // Standard MT5 Trade libraries for execution & position queries
@@ -996,7 +996,7 @@ int OnInit()
    g_runtimeReady = false;
    SymbolSelect(_Symbol, true);
    SEGSSyncStopSettings(InpPublishStopSettingsToAllCharts);
-   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.76 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT][Stage 1/9] Initializing SEGS Trade Manager Pro v3.77 on Symbol: %s, ChartID: %I64d", _Symbol, ChartID());
 
    // STAGE 1: Parameter & Input Sanitization (Clamp to safe baseline defaults instead of fatal INIT_FAILED)
    if(InpNumClonedTrades != 3)
@@ -1083,7 +1083,7 @@ int OnInit()
    GlobalVariableSet("SEGS_HB_" + IntegerToString(ChartID()), (double)TimeCurrent());
    GlobalVariablesFlush();
 
-   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.76 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
+   PrintFormat("[SEGS INIT] === SUCCESS: SEGS Trade Manager Pro v3.77 fully attached and operational on %s (Chart %I64d) ===", _Symbol, ChartID());
    return(INIT_SUCCEEDED);
 }
 
@@ -1212,7 +1212,7 @@ string SEGSDeinitReasonText(int reason)
 
 void OnDeinit(const int reason)
 {
-   PrintFormat("[SEGS DEINIT DETAIL] build=3.76 reason=%s; check preceding Experts/Journal lines for fatal runtime errors.", SEGSDeinitReasonText(reason));
+   PrintFormat("[SEGS DEINIT DETAIL] build=3.77 reason=%s; check preceding Experts/Journal lines for fatal runtime errors.", SEGSDeinitReasonText(reason));
    PrintFormat("[SEGS DEINIT] reason=%d, lastError=%d, symbol=%s, chart=%I64d, phase=%.0f", reason, GetLastError(), _Symbol, ChartID(), GlobalVariableGet("SEGS_PHASE_" + IntegerToString(ChartID())));
    g_runtimeReady = false;
    GlobalVariableDel("SEGS_HB_" + IntegerToString(ChartID()));
@@ -10269,8 +10269,29 @@ bool EvaluateTrendReversalConditions(string sym,
 //+------------------------------------------------------------------+
 //| Master Trade Advice & Strategy Scanner                           |
 //+------------------------------------------------------------------+
+// Scope guard releases the scan lock on every normal return path.
+bool g_strategyScanRunning = false;
+class SEGSStrategyScanGuard
+{
+private:
+   bool m_entered;
+public:
+   SEGSStrategyScanGuard()
+   {
+      m_entered = !g_strategyScanRunning;
+      if(m_entered) g_strategyScanRunning = true;
+   }
+   ~SEGSStrategyScanGuard()
+   {
+      if(m_entered) g_strategyScanRunning = false;
+   }
+   bool Entered() { return m_entered; }
+};
+
 void ScanMarketStructureAndAdvice(bool forceScan=false)
 {
+   SEGSStrategyScanGuard scanGuard;
+   if(!scanGuard.Entered()) return;
    string sym = _Symbol;
    if(SEGSResetExpiredSetup(sym)) forceScan = true;
    int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
@@ -16666,7 +16687,7 @@ void DrawSentimentHUD()
    // Row 2: Dedicated Hotkey Quick Reference Strip (Zero Overlap)
    string hotkeyStr = "HOTKEYS: [Z] Setup  •  [J] Smart Lot  •  [V] Move  •  [M] Close  •  [?] Help";
    CreateOrUpdateCell(PREFIX + "SNT_FTR_HOTKEYS", sx + 14, ftrY + 19, hotkeyStr, clrAqua, 7, ANCHOR_LEFT_UPPER, CORNER_LEFT_UPPER, InpFontName);
-   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.76", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
+   CreateOrUpdateCell(PREFIX + "SNT_FTR_VER", sx + cardW - 8, ftrY + 19, "SEGS PRO v3.77", C'70,105,150', 7, ANCHOR_RIGHT_UPPER, CORNER_LEFT_UPPER, "Consolas Bold");
 }
 void DeleteWinRateHUD()
 {

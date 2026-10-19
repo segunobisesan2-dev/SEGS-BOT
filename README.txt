@@ -1,4 +1,4 @@
-# SEGS-BOT — full EA v3.76
+# SEGS-BOT — full EA v3.77
 
 [Download the full MT5 source](https://raw.githubusercontent.com/segunobisesan2-dev/SEGS-BOT/main/SEGS_Trade_Manager_Pro_v3.75.mq5)
 
@@ -72,3 +72,9 @@ Found a direct call cycle: DrawSentimentHUD called ScanMarketStructureAndAdvice,
 The complete new source is SEGS_Trade_Manager_Pro_v3.76.mq5. Older filenames are synchronized compatibility copies with internal version 3.76. Planned-line/containing-block execution and previous stop safeguards are retained. Deinitialization logs now include a named terminal reason and build number, alongside the original numeric reason/error/phase. Fatal runtime errors may stop the EA before OnDeinit logs; capture preceding Experts and Journal lines too.
 
 Validation: the recursion regression rejects the pre-fix source and accepts the new source; existing extracted C++ stop/entry/expiry tests and synchronization/lexical checks pass. No native MetaEditor compiler or MT5 runtime is installed here. Compile v3.76 with F7, attach the newly compiled EA on USDCHF and EURUSD demo charts, and verify the Experts initialization banner says v3.76. Test HUD toggles, setup cancellation, plan contact, account-wide setting changes, and timeframe changes.
+
+## v3.77 — confirmed stack-overflow report and scanner re-entry guard
+
+Supplied screenshots show USDCHF and EURUSD v3.75 flooding the viable-block trigger log, followed by `stack overflow in 'SEGS.mq5' (1,1)`. This is consistent with the scanner/HUD recursion removed in v3.76. v3.77 retains that fix and adds a scoped scanner re-entry guard: nested scans return immediately, and every normal exit releases the guard. The extracted guard is tested for nested calls, early returns, lock ownership, and repeated subsequent scans. The no-recursion source check is now part of verify_source.py.
+
+Download the full SEGS_Trade_Manager_Pro_v3.77.mq5, compile with F7 in MetaEditor, and attach the resulting v3.77 EA to USDCHF/EURUSD demo charts. If retaining the old SEGS name, replace the contents of SEGS.mq5 with the complete new source and compile that file. Verify the initialization banner and HUD say v3.77. No native MQL5 compile or live MT5 test has been performed in this environment.
